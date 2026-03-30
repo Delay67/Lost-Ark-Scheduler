@@ -751,6 +751,39 @@ function evaluateSlot(
       seededSupportCount += 1;
     }
 
+    // Before filling DPS, try to fill remaining support slots with flex characters (more aggressive)
+    const flexCandidatesForSupport = sortedCandidates.filter((c) => {
+      if (c.role !== "DPS/Support") {
+        return false;
+      }
+      if (seededUsedCharacterIds.has(c.id)) {
+        return false;
+      }
+      if (seededUsedPlayerIds.has(c.playerId)) {
+        return false;
+      }
+      return true;
+    });
+
+    for (const flexChar of flexCandidatesForSupport) {
+      if (seededSupportCount >= caps.maxSupport) {
+        break;
+      }
+      if (seededAssignments.length >= capacity) {
+        break;
+      }
+      
+      seededUsedCharacterIds.add(flexChar.id);
+      seededUsedPlayerIds.add(flexChar.playerId);
+      seededAssignments.push({
+        raidId: raid.id,
+        characterId: flexChar.id,
+        playerId: flexChar.playerId,
+        assignedRole: "Support"
+      });
+      seededSupportCount += 1;
+    }
+
     while (seededDpsCount < caps.maxDps && seededAssignments.length < capacity) {
       const assigned = tryAssign("DPS", seededUsedCharacterIds, seededUsedPlayerIds, seededAssignments);
       if (!assigned) {
@@ -996,6 +1029,22 @@ function generateWeeklyScheduleSingleAttempt(input: GenerateScheduleInput, attem
           const bestSoft = softScheduleObjective(raidSchedules, bestForRaid.scheduledRaid);
           const softImproves = isSoftObjectiveBetter(evalSoft, bestSoft);
 
+          // Prioritize day overflow: deprioritize slots on days already exceeding soft limit
+          if (evalSoft.dayOverflow !== bestSoft.dayOverflow) {
+            if (evalSoft.dayOverflow < bestSoft.dayOverflow) {
+              bestForRaid = evaluation;
+            }
+            continue;
+          }
+
+          // Then prioritize same-raid streak (avoid clustering same raid)
+          if (evalSoft.streakExcess !== bestSoft.streakExcess) {
+            if (evalSoft.streakExcess < bestSoft.streakExcess) {
+              bestForRaid = evaluation;
+            }
+            continue;
+          }
+
           if (evalDeadtime.maxGapMinutes < bestDeadtime.maxGapMinutes) {
             bestForRaid = evaluation;
             continue;
@@ -1088,6 +1137,24 @@ function generateWeeklyScheduleSingleAttempt(input: GenerateScheduleInput, attem
         const evalSoft = softScheduleObjective(raidSchedules, bestForRaid.scheduledRaid);
         const bestSoft = softScheduleObjective(raidSchedules, bestEvaluation.scheduledRaid);
         const softImproves = isSoftObjectiveBetter(evalSoft, bestSoft);
+
+        // Prioritize day overflow: deprioritize slots on days already exceeding soft limit
+        if (evalSoft.dayOverflow !== bestSoft.dayOverflow) {
+          if (evalSoft.dayOverflow < bestSoft.dayOverflow) {
+            bestRaidTemplate = raid;
+            bestEvaluation = bestForRaid;
+          }
+          continue;
+        }
+
+        // Then prioritize same-raid streak (avoid clustering same raid)
+        if (evalSoft.streakExcess !== bestSoft.streakExcess) {
+          if (evalSoft.streakExcess < bestSoft.streakExcess) {
+            bestRaidTemplate = raid;
+            bestEvaluation = bestForRaid;
+          }
+          continue;
+        }
 
         if (evalDeadtime.maxGapMinutes < bestDeadtime.maxGapMinutes) {
           bestRaidTemplate = raid;
