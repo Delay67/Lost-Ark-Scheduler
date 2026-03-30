@@ -18,7 +18,6 @@ type GridRow = {
   day: string;
   raid: string;
   corePlayers: Record<string, string>;
-  extras: string[];
   supports: string[];
   count: number;
 };
@@ -50,25 +49,22 @@ export function toWeeklyGrid(
   const playerById = new Map(input.players.map((p) => [p.id, p.name]));
   const characterById = new Map(input.characters.map((c) => [c.id, c]));
 
-  const discoveredDpsPlayers = new Set<string>();
+  const discoveredPlayers = new Set<string>();
   for (const raid of schedule.raidSchedules) {
     for (const assignment of raid.assignments) {
-      if (assignment.assignedRole !== "DPS") {
-        continue;
-      }
       const playerName = playerById.get(assignment.playerId);
       if (playerName) {
-        discoveredDpsPlayers.add(playerName);
+        discoveredPlayers.add(playerName);
       }
     }
   }
 
   const baseOrder = options?.corePlayerOrder && options.corePlayerOrder.length > 0
     ? options.corePlayerOrder
-    : [...discoveredDpsPlayers].sort((a, b) => a.localeCompare(b));
+    : [...discoveredPlayers].sort((a, b) => a.localeCompare(b));
 
   const corePlayerOrder = [...baseOrder];
-  for (const discovered of [...discoveredDpsPlayers].sort((a, b) => a.localeCompare(b))) {
+  for (const discovered of [...discoveredPlayers].sort((a, b) => a.localeCompare(b))) {
     if (!corePlayerOrder.includes(discovered)) {
       corePlayerOrder.push(discovered);
     }
@@ -83,27 +79,28 @@ export function toWeeklyGrid(
     }
     return a.raid.startMinute - b.raid.startMinute;
   })) {
+    if (raidSchedule.assignments.length === 0) {
+      continue;
+    }
+
     const corePlayers: Record<string, string> = {};
     for (const playerName of corePlayerOrder) {
       corePlayers[playerName] = "";
     }
 
-    const extras: string[] = [];
     const supports: string[] = [];
 
     for (const assignment of raidSchedule.assignments) {
       const playerName = playerById.get(assignment.playerId) ?? assignment.playerId;
       const character = characterById.get(assignment.characterId);
 
+      if (corePlayers[playerName] !== undefined && corePlayers[playerName] === "") {
+        corePlayers[playerName] = playerName;
+      }
+
       if (assignment.assignedRole === "Support") {
         supports.push(character?.name ?? playerName);
         continue;
-      }
-
-      if (corePlayers[playerName] !== undefined && corePlayers[playerName] === "") {
-        corePlayers[playerName] = playerName;
-      } else {
-        extras.push(playerName);
       }
     }
 
@@ -113,9 +110,8 @@ export function toWeeklyGrid(
         notes: "",
         time: formatMinuteOfDay(raidSchedule.raid.startMinute),
         day: DAY_NAMES[raidSchedule.raid.dayOfWeek],
-        raid: raidSchedule.raid.name,
+        raid: `${raidSchedule.raid.name}-${raidSchedule.raid.difficulty}`,
         corePlayers,
-        extras,
         supports,
         count: raidSchedule.assignments.length
       }

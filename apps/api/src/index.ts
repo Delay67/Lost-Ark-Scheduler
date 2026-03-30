@@ -101,7 +101,8 @@ const CharacterUpdateSchema = z.object({
   playerId: z.string().min(1).optional(),
   name: z.string().min(1).optional(),
   role: RoleSchema.optional(),
-  itemLevel: z.number().int().positive().optional()
+  itemLevel: z.number().int().positive().optional(),
+  raidOptOutRaidIds: z.array(z.string().min(1)).optional()
 }).refine((v) => Object.keys(v).length > 0, {
   message: "At least one field must be provided"
 });

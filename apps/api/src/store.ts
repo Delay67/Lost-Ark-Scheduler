@@ -76,7 +76,13 @@ export class Store {
 
   async updateCharacter(
     id: string,
-    patch: { playerId?: string; name?: string; role?: Character["role"]; itemLevel?: number }
+    patch: {
+      playerId?: string;
+      name?: string;
+      role?: Character["role"];
+      itemLevel?: number;
+      raidOptOutRaidIds?: string[];
+    }
   ): Promise<Character | null> {
     const data = await this.load();
     const index = data.characters.findIndex((c) => c.id === id);

@@ -15,7 +15,8 @@ const CharacterCreateSchemaBase = z.object({
   playerId: z.string().min(1),
   name: z.string().min(1),
   role: RoleSchema,
-  itemLevel: z.number().int().positive()
+  itemLevel: z.number().int().positive(),
+  raidOptOutRaidIds: z.array(z.string().min(1)).default([])
 });
 
 const AvailabilityWindowCreateSchemaBase = z.object({

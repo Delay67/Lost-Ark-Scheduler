@@ -14,6 +14,8 @@ const raidForm = document.getElementById("raid-form");
 const availabilityForm = document.getElementById("availability-form");
 
 const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+let latestCharacters = [];
+let latestRaids = [];
 
 const tabButtons = [...document.querySelectorAll("[data-tab-target]")];
 const tabPanels = [...document.querySelectorAll("[data-tab]")];
@@ -85,15 +87,61 @@ function renderPlayers(players) {
   }
 }
 
-function renderCharacters(characters, playersById) {
+function normalizeRaidName(name) {
+  return String(name).trim().toLowerCase();
+}
+
+function getTopThreeRaidsForCharacter(character, raids) {
+  const sortedRaids = [...raids].sort((a, b) => {
+    if (b.itemLevelRequirement !== a.itemLevelRequirement) {
+      return b.itemLevelRequirement - a.itemLevelRequirement;
+    }
+    return a.id.localeCompare(b.id);
+  });
+
+  const top = [];
+  const seenNames = new Set();
+
+  for (const raid of sortedRaids) {
+    if (character.itemLevel < raid.itemLevelRequirement) {
+      continue;
+    }
+    const nameKey = normalizeRaidName(raid.name);
+    if (seenNames.has(nameKey)) {
+      continue;
+    }
+
+    seenNames.add(nameKey);
+    top.push(raid);
+    if (top.length >= 3) {
+      break;
+    }
+  }
+
+  return top;
+}
+
+function renderCharacters(characters, playersById, raids) {
   charactersTable.innerHTML = "";
   for (const character of characters) {
+    const topRaids = getTopThreeRaidsForCharacter(character, raids);
+    const optOut = new Set(character.raidOptOutRaidIds ?? []);
+    const topRaidsHtml = topRaids.length > 0
+      ? `<div class="raid-opt-list">${topRaids
+        .map((raid) => {
+          const checked = !optOut.has(raid.id);
+          return `<label class="raid-opt-item"><input type="checkbox" data-action="toggle-raid-optout" data-character-id="${character.id}" data-raid-id="${raid.id}" ${checked ? "checked" : ""}/> ${escapeHtml(`${raid.name}-${raid.difficulty}`)}</label>`;
+        })
+        .join("")}</div>`
+      : `<span class="raid-opt-empty">No eligible raids</span>`;
+
     const row = document.createElement("tr");
     row.innerHTML = `
       <td>${character.name}</td>
       <td>${playersById.get(character.playerId) ?? character.playerId}</td>
       <td>${character.role}</td>
       <td>${character.itemLevel}</td>
+      <td>${topRaidsHtml}</td>
       <td>${character.id}</td>
       <td>
         <button
@@ -193,7 +241,6 @@ function renderScheduleGrid(grid) {
     "Day",
     "Raid",
     ...coreCols,
-    "Extras",
     ...Array.from({ length: supportCount }, (_, index) => `Support ${index + 1}`),
     "Count"
   ];
@@ -211,6 +258,19 @@ function renderScheduleGrid(grid) {
 
   for (const dayBlock of grid.days) {
     const dayRows = dayBlock.rows ?? [];
+    if (dayRows.length > 0) {
+      const dividerRow = document.createElement("tr");
+      dividerRow.className = "day-break-row";
+
+      const dividerCell = document.createElement("td");
+      dividerCell.colSpan = headers.length;
+      dividerCell.textContent = dayBlock.day ?? "";
+      dividerCell.className = "day-break-cell";
+
+      dividerRow.append(dividerCell);
+      tbody.append(dividerRow);
+    }
+
     for (const row of dayRows) {
       const tr = document.createElement("tr");
 
@@ -221,7 +281,6 @@ function renderScheduleGrid(grid) {
         row.day ?? dayBlock.day ?? "",
         row.raid ?? "",
         ...coreCols.map((playerName) => row.corePlayers?.[playerName] ?? ""),
-        (row.extras ?? []).join(", "),
         ...supportCells,
         String(row.count ?? 0)
       ];
@@ -250,9 +309,11 @@ async function refresh() {
     api("/raids"),
     api("/availability-windows")
   ]);
+  latestCharacters = characters;
+  latestRaids = raids;
   const playersById = new Map(players.map((p) => [p.id, p.name]));
   renderPlayers(players);
-  renderCharacters(characters, playersById);
+  renderCharacters(characters, playersById, raids);
   renderRaids(raids);
   renderAvailability(availability, playersById);
   buildPlayerSelect(players);
@@ -435,6 +496,44 @@ charactersTable.addEventListener("click", async (event) => {
       setStatus("Character updated.");
     }
   } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+charactersTable.addEventListener("change", async (event) => {
+  const input = event.target.closest('input[data-action="toggle-raid-optout"]');
+  if (!input) {
+    return;
+  }
+
+  const characterId = input.dataset.characterId;
+  const raidId = input.dataset.raidId;
+  const isChecked = input.checked;
+  const character = latestCharacters.find((c) => c.id === characterId);
+
+  if (!character || !raidId) {
+    setStatus("Unable to update raid selection.", true);
+    return;
+  }
+
+  const nextOptOut = new Set(character.raidOptOutRaidIds ?? []);
+  if (isChecked) {
+    nextOptOut.delete(raidId);
+  } else {
+    nextOptOut.add(raidId);
+  }
+
+  try {
+    await api(`/characters/${characterId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        raidOptOutRaidIds: [...nextOptOut]
+      })
+    });
+    await refresh();
+    setStatus("Character raid preferences updated.");
+  } catch (error) {
+    input.checked = !isChecked;
     setStatus(error.message, true);
   }
 });
