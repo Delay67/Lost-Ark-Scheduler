@@ -1,0 +1,17 @@
+{
+  "name": "lost-ark-scheduler",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm --workspace @las/shared run build && npm --workspace @las/scheduler run build && npm --workspace @las/api run build",
+    "dev": "npm --workspace @las/shared run build && npm --workspace @las/scheduler run build && npm --workspace @las/api run dev",
+    "typecheck": "npm --workspace @las/shared run typecheck && npm --workspace @las/scheduler run typecheck && npm --workspace @las/api run typecheck"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
