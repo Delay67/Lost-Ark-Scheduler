@@ -15,10 +15,11 @@ This repository now contains the first implementation slice of a weekly raid sch
 - Store player names.
 - Store characters under players.
 - Character item level and role (`DPS`, `Support`, `DPS/Support`).
-- Store raids with name, difficulty (`Normal`, `Hard`, `Nightmare`), and item level requirement.
+- Store raids with exactly these fields: `name`, `difficulty`, `itemLevelRequirement`, `durationMinutes`.
 - Store player recurring weekly availability windows by day and time range.
 - Raid capacity support for 4 and 8 players.
 - Per-raid customizable duration.
+- Raid start time is dynamically allocated by the scheduler from availability windows.
 - Role caps enforced:
 	- 8-player raids: max 6 DPS, max 2 Supports.
 	- 4-player raids: max 3 DPS, max 1 Support.
@@ -55,6 +56,28 @@ GET http://localhost:3000/health
 
 ## API endpoints
 
+### Admin UI
+
+Open in browser:
+
+`GET http://localhost:3000/`
+
+This page supports create, edit, and delete for players and characters.
+
+### Players CRUD
+
+- `GET /players`
+- `POST /players`
+- `PATCH /players/:id`
+- `DELETE /players/:id`
+
+### Characters CRUD
+
+- `GET /characters`
+- `POST /characters`
+- `PATCH /characters/:id`
+- `DELETE /characters/:id`
+
 ### Create player
 
 `POST /players`
@@ -87,16 +110,11 @@ GET http://localhost:3000/health
 	"name": "Thaemine G1-G3",
 	"difficulty": "Hard",
 	"itemLevelRequirement": 1630,
-	"capacity": 8,
-	"dayOfWeek": 2,
-	"startMinute": 1140,
 	"durationMinutes": 90
 }
 ```
 
-`dayOfWeek` uses `0-6` (`0 = Sunday`).
-
-`startMinute` is minutes since midnight (`19:00 => 1140`).
+Raid timing is always dynamically allocated from availability windows.
 
 ### Create availability window
 

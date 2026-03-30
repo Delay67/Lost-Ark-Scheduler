@@ -3,7 +3,6 @@ import { z } from "zod";
 export const RoleSchema = z.enum(["DPS", "Support", "DPS/Support"]);
 export const AssignedRoleSchema = z.enum(["DPS", "Support"]);
 export const DifficultySchema = z.enum(["Normal", "Hard", "Nightmare"]);
-export const RaidCapacitySchema = z.union([z.literal(4), z.literal(8)]);
 
 export const DayOfWeekSchema = z.number().int().min(0).max(6);
 export const MinuteOfDaySchema = z.number().int().min(0).max(24 * 60 - 1);
@@ -28,12 +27,8 @@ const AvailabilityWindowCreateSchemaBase = z.object({
 
 const RaidCreateSchemaBase = z.object({
   name: z.string().min(1),
-  notes: z.string().optional(),
   difficulty: DifficultySchema,
   itemLevelRequirement: z.number().int().positive(),
-  capacity: RaidCapacitySchema,
-  dayOfWeek: DayOfWeekSchema,
-  startMinute: MinuteOfDaySchema,
   durationMinutes: z.number().int().positive().max(24 * 60)
 });
 
@@ -57,14 +52,10 @@ export const AvailabilityWindowSchema = AvailabilityWindowCreateSchemaBase.exten
   message: "endMinute must be greater than startMinute"
 });
 
-export const RaidCreateSchema = RaidCreateSchemaBase.refine((r) => r.startMinute + r.durationMinutes <= 24 * 60, {
-  message: "raid must end within same day"
-});
+export const RaidCreateSchema = RaidCreateSchemaBase;
 
 export const RaidInstanceSchema = RaidCreateSchemaBase.extend({
   id: z.string().min(1)
-}).refine((r) => r.startMinute + r.durationMinutes <= 24 * 60, {
-  message: "raid must end within same day"
 });
 
 export const AssignmentSchema = z.object({
@@ -91,7 +82,7 @@ export const GenerateScheduleInputSchema = z.object({
 export type Role = z.infer<typeof RoleSchema>;
 export type AssignedRole = z.infer<typeof AssignedRoleSchema>;
 export type Difficulty = z.infer<typeof DifficultySchema>;
-export type RaidCapacity = z.infer<typeof RaidCapacitySchema>;
+export type PartySize = 4 | 8;
 export type Player = z.infer<typeof PlayerSchema>;
 export type Character = z.infer<typeof CharacterSchema>;
 export type RaidInstance = z.infer<typeof RaidInstanceSchema>;
@@ -101,10 +92,16 @@ export type DataStore = z.infer<typeof DataStoreSchema>;
 export type GenerateScheduleInput = z.infer<typeof GenerateScheduleInputSchema>;
 
 export type RaidSchedule = {
-  raid: RaidInstance;
+  raid: ScheduledRaid;
   assignments: Assignment[];
   isFull: boolean;
   warnings: string[];
+};
+
+export type ScheduledRaid = RaidInstance & {
+  dayOfWeek: number;
+  startMinute: number;
+  capacity: PartySize;
 };
 
 export type PlayerDeadtimeSummary = {
@@ -132,7 +129,7 @@ export function formatMinuteOfDay(minuteOfDay: number): string {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
 }
 
-export function roleCaps(capacity: RaidCapacity): { maxDps: number; maxSupport: number } {
+export function roleCaps(capacity: PartySize): { maxDps: number; maxSupport: number } {
   return capacity === 8
     ? { maxDps: 6, maxSupport: 2 }
     : { maxDps: 3, maxSupport: 1 };

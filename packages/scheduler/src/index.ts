@@ -3,10 +3,12 @@ import {
   type Character,
   daySortKeyFromWeekStart,
   type GenerateScheduleInput,
+  type PartySize,
   type PlayerDeadtimeSummary,
   type RaidInstance,
   type RaidSchedule,
   type Role,
+  type ScheduledRaid,
   type ScheduleResult,
   roleCaps
 } from "@las/shared";
@@ -18,23 +20,28 @@ type PlayerRaidSlot = {
   endMinute: number;
 };
 
-function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {
-  return aStart < bEnd && bStart < aEnd;
+type TimeSlot = {
+  dayOfWeek: number;
+  startMinute: number;
+};
+
+const SLOT_STEP_MINUTES = 20;
+
+const RAID_PARTY_SIZE_RULES: Array<{ match: RegExp; capacity: PartySize }> = [
+  { match: /kayangel|ivory|voldis/i, capacity: 4 }
+];
+
+function partySizeForRaid(raid: RaidInstance): PartySize {
+  for (const rule of RAID_PARTY_SIZE_RULES) {
+    if (rule.match.test(raid.name)) {
+      return rule.capacity;
+    }
+  }
+  return 8;
 }
 
-function playerIsAvailable(
-  playerId: string,
-  raid: RaidInstance,
-  availabilityByPlayer: Map<string, { dayOfWeek: number; startMinute: number; endMinute: number }[]>
-): boolean {
-  const windows = availabilityByPlayer.get(playerId) ?? [];
-  const raidEnd = raid.startMinute + raid.durationMinutes;
-  return windows.some((w) => {
-    if (w.dayOfWeek !== raid.dayOfWeek) {
-      return false;
-    }
-    return w.startMinute <= raid.startMinute && w.endMinute >= raidEnd;
-  });
+function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {
+  return aStart < bEnd && bStart < aEnd;
 }
 
 function canTakeRole(characterRole: Role, neededRole: "DPS" | "Support"): boolean {
@@ -44,7 +51,7 @@ function canTakeRole(characterRole: Role, neededRole: "DPS" | "Support"): boolea
   return characterRole === neededRole;
 }
 
-function hasRaidConflict(playerSlots: PlayerRaidSlot[], raid: RaidInstance): boolean {
+function hasRaidConflict(playerSlots: PlayerRaidSlot[], raid: ScheduledRaid): boolean {
   const raidEnd = raid.startMinute + raid.durationMinutes;
   return playerSlots.some((slot) => {
     if (slot.dayOfWeek !== raid.dayOfWeek) {
@@ -54,7 +61,7 @@ function hasRaidConflict(playerSlots: PlayerRaidSlot[], raid: RaidInstance): boo
   });
 }
 
-function contiguityScore(playerSlots: PlayerRaidSlot[], raid: RaidInstance): number {
+function contiguityScore(playerSlots: PlayerRaidSlot[], raid: ScheduledRaid): number {
   if (playerSlots.length === 0) {
     return 1000;
   }
@@ -122,6 +129,143 @@ function summarizeDeadtime(
   return summaries.sort((a, b) => a.playerId.localeCompare(b.playerId));
 }
 
+function containsSlot(
+  windows: { dayOfWeek: number; startMinute: number; endMinute: number }[],
+  slot: TimeSlot,
+  durationMinutes: number
+): boolean {
+  const endMinute = slot.startMinute + durationMinutes;
+  return windows.some((w) => w.dayOfWeek === slot.dayOfWeek && w.startMinute <= slot.startMinute && w.endMinute >= endMinute);
+}
+
+function buildCandidateSlots(
+  raid: RaidInstance,
+  availabilityByPlayer: Map<string, { dayOfWeek: number; startMinute: number; endMinute: number }[]>
+): TimeSlot[] {
+  const seen = new Set<string>();
+  const slots: TimeSlot[] = [];
+
+  for (const windows of availabilityByPlayer.values()) {
+    for (const window of windows) {
+      const latestStart = window.endMinute - raid.durationMinutes;
+      if (latestStart < window.startMinute) {
+        continue;
+      }
+
+      for (let startMinute = window.startMinute; startMinute <= latestStart; startMinute += SLOT_STEP_MINUTES) {
+        const key = `${window.dayOfWeek}-${startMinute}`;
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        slots.push({ dayOfWeek: window.dayOfWeek, startMinute });
+      }
+    }
+  }
+
+  slots.sort((a, b) => {
+    const daySort = daySortKeyFromWeekStart(a.dayOfWeek, 3) - daySortKeyFromWeekStart(b.dayOfWeek, 3);
+    if (daySort !== 0) {
+      return daySort;
+    }
+    return a.startMinute - b.startMinute;
+  });
+
+  return slots;
+}
+
+function evaluateSlot(
+  raid: RaidInstance,
+  slot: TimeSlot,
+  characters: Character[],
+  availabilityByPlayer: Map<string, { dayOfWeek: number; startMinute: number; endMinute: number }[]>,
+  assignmentsByPlayer: Map<string, PlayerRaidSlot[]>
+): { scheduledRaid: ScheduledRaid; assignments: Assignment[] } {
+  const capacity = partySizeForRaid(raid);
+  const scheduledRaid: ScheduledRaid = {
+    ...raid,
+    capacity,
+    dayOfWeek: slot.dayOfWeek,
+    startMinute: slot.startMinute
+  };
+
+  const caps = roleCaps(capacity);
+  const raidAssignments: Assignment[] = [];
+  const usedCharacterIds = new Set<string>();
+  let supportCount = 0;
+  let dpsCount = 0;
+
+  const candidates = characters.filter((c) => {
+    if (c.itemLevel < raid.itemLevelRequirement) {
+      return false;
+    }
+
+    const windows = availabilityByPlayer.get(c.playerId) ?? [];
+    if (!containsSlot(windows, slot, raid.durationMinutes)) {
+      return false;
+    }
+
+    const existingSlots = assignmentsByPlayer.get(c.playerId) ?? [];
+    if (hasRaidConflict(existingSlots, scheduledRaid)) {
+      return false;
+    }
+
+    return true;
+  });
+
+  const sortedCandidates = [...candidates].sort((a, b) => {
+    const aSlots = assignmentsByPlayer.get(a.playerId) ?? [];
+    const bSlots = assignmentsByPlayer.get(b.playerId) ?? [];
+    const scoreDiff = contiguityScore(bSlots, scheduledRaid) - contiguityScore(aSlots, scheduledRaid);
+    if (scoreDiff !== 0) {
+      return scoreDiff;
+    }
+    if (a.itemLevel !== b.itemLevel) {
+      return a.itemLevel - b.itemLevel;
+    }
+    return a.id.localeCompare(b.id);
+  });
+
+  const tryAssign = (neededRole: "DPS" | "Support") => {
+    for (const character of sortedCandidates) {
+      if (usedCharacterIds.has(character.id)) {
+        continue;
+      }
+      if (!canTakeRole(character.role, neededRole)) {
+        continue;
+      }
+
+      usedCharacterIds.add(character.id);
+      raidAssignments.push({
+        raidId: raid.id,
+        characterId: character.id,
+        playerId: character.playerId,
+        assignedRole: neededRole
+      });
+      return true;
+    }
+    return false;
+  };
+
+  while (supportCount < caps.maxSupport && raidAssignments.length < capacity) {
+    const assigned = tryAssign("Support");
+    if (!assigned) {
+      break;
+    }
+    supportCount += 1;
+  }
+
+  while (dpsCount < caps.maxDps && raidAssignments.length < capacity) {
+    const assigned = tryAssign("DPS");
+    if (!assigned) {
+      break;
+    }
+    dpsCount += 1;
+  }
+
+  return { scheduledRaid, assignments: raidAssignments };
+}
+
 export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleResult {
   const availabilityByPlayer = new Map<string, { dayOfWeek: number; startMinute: number; endMinute: number }[]>();
   for (const window of input.availabilityWindows) {
@@ -132,114 +276,89 @@ export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleRe
 
   const characters = [...input.characters];
   const raids = [...input.raids].sort((a, b) => {
-    const dayKeyA = daySortKeyFromWeekStart(a.dayOfWeek, 3);
-    const dayKeyB = daySortKeyFromWeekStart(b.dayOfWeek, 3);
-    if (dayKeyA !== dayKeyB) {
-      return dayKeyA - dayKeyB;
+    if (b.itemLevelRequirement !== a.itemLevelRequirement) {
+      return b.itemLevelRequirement - a.itemLevelRequirement;
     }
-    if (a.startMinute !== b.startMinute) {
-      return a.startMinute - b.startMinute;
+    if (b.durationMinutes !== a.durationMinutes) {
+      return b.durationMinutes - a.durationMinutes;
     }
-    return b.itemLevelRequirement - a.itemLevelRequirement;
+    return a.id.localeCompare(b.id);
   });
 
   const assignmentsByPlayer = new Map<string, PlayerRaidSlot[]>();
   const raidSchedules: RaidSchedule[] = [];
 
   for (const raid of raids) {
-    const caps = roleCaps(raid.capacity);
-    const raidAssignments: Assignment[] = [];
-    const usedCharacterIds = new Set<string>();
-    let supportCount = 0;
-    let dpsCount = 0;
+    const candidateSlots = buildCandidateSlots(raid, availabilityByPlayer);
+    let best: { scheduledRaid: ScheduledRaid; assignments: Assignment[] } | null = null;
 
-    const candidates = characters.filter((c) => {
-      if (c.itemLevel < raid.itemLevelRequirement) {
-        return false;
+    for (const slot of candidateSlots) {
+      const evaluation = evaluateSlot(raid, slot, characters, availabilityByPlayer, assignmentsByPlayer);
+      if (!best || evaluation.assignments.length > best.assignments.length) {
+        best = evaluation;
+        continue;
       }
-      if (!playerIsAvailable(c.playerId, raid, availabilityByPlayer)) {
-        return false;
-      }
-      const slots = assignmentsByPlayer.get(c.playerId) ?? [];
-      if (hasRaidConflict(slots, raid)) {
-        return false;
-      }
-      return true;
-    });
 
-    const sortedCandidates = [...candidates].sort((a, b) => {
-      const aSlots = assignmentsByPlayer.get(a.playerId) ?? [];
-      const bSlots = assignmentsByPlayer.get(b.playerId) ?? [];
-      const scoreDiff = contiguityScore(bSlots, raid) - contiguityScore(aSlots, raid);
-      if (scoreDiff !== 0) {
-        return scoreDiff;
+      if (!best) {
+        continue;
       }
-      if (a.itemLevel !== b.itemLevel) {
-        return a.itemLevel - b.itemLevel;
-      }
-      return a.id.localeCompare(b.id);
-    });
 
-    const tryAssign = (neededRole: "DPS" | "Support") => {
-      for (const character of sortedCandidates) {
-        if (usedCharacterIds.has(character.id)) {
-          continue;
+      if (evaluation.assignments.length === best.assignments.length) {
+        const evalDay = daySortKeyFromWeekStart(evaluation.scheduledRaid.dayOfWeek, 3);
+        const bestDay = daySortKeyFromWeekStart(best.scheduledRaid.dayOfWeek, 3);
+        if (evalDay < bestDay || (evalDay === bestDay && evaluation.scheduledRaid.startMinute < best.scheduledRaid.startMinute)) {
+          best = evaluation;
         }
-        if (!canTakeRole(character.role, neededRole)) {
-          continue;
-        }
-
-        usedCharacterIds.add(character.id);
-        raidAssignments.push({
-          raidId: raid.id,
-          characterId: character.id,
-          playerId: character.playerId,
-          assignedRole: neededRole
-        });
-
-        const slotList = assignmentsByPlayer.get(character.playerId) ?? [];
-        slotList.push({
-          raidId: raid.id,
-          dayOfWeek: raid.dayOfWeek,
-          startMinute: raid.startMinute,
-          endMinute: raid.startMinute + raid.durationMinutes
-        });
-        assignmentsByPlayer.set(character.playerId, slotList);
-        return true;
       }
-      return false;
-    };
-
-    while (supportCount < caps.maxSupport && raidAssignments.length < raid.capacity) {
-      const assigned = tryAssign("Support");
-      if (!assigned) {
-        break;
-      }
-      supportCount += 1;
     }
 
-    while (dpsCount < caps.maxDps && raidAssignments.length < raid.capacity) {
-      const assigned = tryAssign("DPS");
-      if (!assigned) {
-        break;
-      }
-      dpsCount += 1;
+    const scheduledRaid: ScheduledRaid = best?.scheduledRaid ?? {
+      ...raid,
+      capacity: partySizeForRaid(raid),
+      dayOfWeek: 3,
+      startMinute: 0
+    };
+    const raidAssignments = best?.assignments ?? [];
+
+    for (const assignment of raidAssignments) {
+      const slotList = assignmentsByPlayer.get(assignment.playerId) ?? [];
+      slotList.push({
+        raidId: scheduledRaid.id,
+        dayOfWeek: scheduledRaid.dayOfWeek,
+        startMinute: scheduledRaid.startMinute,
+        endMinute: scheduledRaid.startMinute + scheduledRaid.durationMinutes
+      });
+      assignmentsByPlayer.set(assignment.playerId, slotList);
     }
 
     const warnings: string[] = [];
-    if (raidAssignments.length < raid.capacity) {
+    if (candidateSlots.length === 0) {
+      warnings.push("No viable time slot found from current availability windows.");
+    }
+    if (raidAssignments.length < scheduledRaid.capacity) {
       warnings.push(
-        `Raid underfilled: assigned ${raidAssignments.length}/${raid.capacity} due to availability, ilvl, or overlap constraints.`
+        `Raid underfilled: assigned ${raidAssignments.length}/${scheduledRaid.capacity} due to availability, ilvl, or overlap constraints.`
       );
     }
 
     raidSchedules.push({
-      raid,
+      raid: scheduledRaid,
       assignments: raidAssignments,
-      isFull: raidAssignments.length === raid.capacity,
+      isFull: raidAssignments.length === scheduledRaid.capacity,
       warnings
     });
   }
+
+  raidSchedules.sort((a, b) => {
+    const daySort = daySortKeyFromWeekStart(a.raid.dayOfWeek, 3) - daySortKeyFromWeekStart(b.raid.dayOfWeek, 3);
+    if (daySort !== 0) {
+      return daySort;
+    }
+    if (a.raid.startMinute !== b.raid.startMinute) {
+      return a.raid.startMinute - b.raid.startMinute;
+    }
+    return a.raid.id.localeCompare(b.raid.id);
+  });
 
   const unassignedRaidIds = raidSchedules.filter((r) => !r.isFull).map((r) => r.raid.id);
   const playerDeadtime = summarizeDeadtime(assignmentsByPlayer);

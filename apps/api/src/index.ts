@@ -1,8 +1,11 @@
 import express from "express";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import {
   AvailabilityWindowCreateSchema,
   CharacterCreateSchema,
   GenerateScheduleInputSchema,
+  RoleSchema,
   PlayerCreateSchema,
   RaidCreateSchema
 } from "@las/shared";
@@ -15,6 +18,10 @@ import { Store } from "./store.js";
 const app = express();
 app.use(express.json());
 
+const fileName = fileURLToPath(import.meta.url);
+const dirName = dirname(fileName);
+app.use(express.static(join(dirName, "../public")));
+
 const store = new Store("data/store.json");
 
 app.get("/health", (_req, res) => {
@@ -26,6 +33,11 @@ app.get("/data", async (_req, res) => {
   res.json(data);
 });
 
+app.get("/players", async (_req, res) => {
+  const data = await store.load();
+  res.json(data.players);
+});
+
 app.post("/players", async (req, res) => {
   const parsed = PlayerCreateSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -34,6 +46,39 @@ app.post("/players", async (req, res) => {
 
   const created = await store.addPlayer({ id: newId(), ...parsed.data });
   return res.status(201).json(created);
+});
+
+const PlayerUpdateSchema = z.object({
+  name: z.string().min(1).optional()
+}).refine((v) => v.name !== undefined, {
+  message: "At least one field must be provided"
+});
+
+app.patch("/players/:id", async (req, res) => {
+  const parsed = PlayerUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const updated = await store.updatePlayer(req.params.id, parsed.data);
+  if (!updated) {
+    return res.status(404).json({ error: "Player not found" });
+  }
+
+  return res.json(updated);
+});
+
+app.delete("/players/:id", async (req, res) => {
+  const deleted = await store.deletePlayer(req.params.id);
+  if (!deleted) {
+    return res.status(404).json({ error: "Player not found" });
+  }
+  return res.status(204).send();
+});
+
+app.get("/characters", async (_req, res) => {
+  const data = await store.load();
+  res.json(data.characters);
 });
 
 app.post("/characters", async (req, res) => {
@@ -50,6 +95,45 @@ app.post("/characters", async (req, res) => {
 
   const created = await store.addCharacter({ id: newId(), ...parsed.data });
   return res.status(201).json(created);
+});
+
+const CharacterUpdateSchema = z.object({
+  playerId: z.string().min(1).optional(),
+  name: z.string().min(1).optional(),
+  role: RoleSchema.optional(),
+  itemLevel: z.number().int().positive().optional()
+}).refine((v) => Object.keys(v).length > 0, {
+  message: "At least one field must be provided"
+});
+
+app.patch("/characters/:id", async (req, res) => {
+  const parsed = CharacterUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  if (parsed.data.playerId) {
+    const data = await store.load();
+    const playerExists = data.players.some((p) => p.id === parsed.data.playerId);
+    if (!playerExists) {
+      return res.status(400).json({ error: "playerId does not exist" });
+    }
+  }
+
+  const updated = await store.updateCharacter(req.params.id, parsed.data);
+  if (!updated) {
+    return res.status(404).json({ error: "Character not found" });
+  }
+
+  return res.json(updated);
+});
+
+app.delete("/characters/:id", async (req, res) => {
+  const deleted = await store.deleteCharacter(req.params.id);
+  if (!deleted) {
+    return res.status(404).json({ error: "Character not found" });
+  }
+  return res.status(204).send();
 });
 
 app.post("/raids", async (req, res) => {

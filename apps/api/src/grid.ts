@@ -110,7 +110,7 @@ export function toWeeklyGrid(
     rows.push({
       dayOfWeek: raidSchedule.raid.dayOfWeek,
       row: {
-        notes: raidSchedule.raid.notes ?? "",
+        notes: "",
         time: formatMinuteOfDay(raidSchedule.raid.startMinute),
         day: DAY_NAMES[raidSchedule.raid.dayOfWeek],
         raid: raidSchedule.raid.name,
