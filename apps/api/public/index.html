@@ -10,76 +10,180 @@
     <main class="container">
       <header>
         <h1>Lost Ark Scheduler Admin</h1>
-        <p>Manage players and characters.</p>
+        <p>Manage players, characters, raids, and availability.</p>
       </header>
 
-      <section class="panel">
-        <h2>Create Player</h2>
-        <form id="player-form">
-          <label>
-            Player Name
-            <input id="player-name" type="text" required />
-          </label>
-          <button type="submit">Add Player</button>
-        </form>
+      <nav class="tabs" role="tablist" aria-label="Admin sections">
+        <button class="tab is-active" data-tab-target="players">Players & Characters</button>
+        <button class="tab" data-tab-target="raids">Raids</button>
+        <button class="tab" data-tab-target="availability">Availability</button>
+      </nav>
+
+      <section class="tab-panel is-active" data-tab="players">
+        <section class="panel">
+          <h2>Create Player</h2>
+          <form id="player-form">
+            <label>
+              Player Name
+              <input id="player-name" type="text" required />
+            </label>
+            <button type="submit">Add Player</button>
+          </form>
+        </section>
+
+        <section class="panel">
+          <h2>Create Character</h2>
+          <form id="character-form">
+            <label>
+              Player
+              <select id="character-player" required></select>
+            </label>
+            <label>
+              Character Name
+              <input id="character-name" type="text" required />
+            </label>
+            <label>
+              Role
+              <select id="character-role" required>
+                <option value="DPS">DPS</option>
+                <option value="Support">Support</option>
+                <option value="DPS/Support">DPS/Support</option>
+              </select>
+            </label>
+            <label>
+              Item Level
+              <input id="character-ilvl" type="number" min="1" required />
+            </label>
+            <button type="submit">Add Character</button>
+          </form>
+        </section>
+
+        <section class="panel">
+          <h2>Players</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>ID</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="players-table"></tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <h2>Characters</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Player</th>
+                <th>Role</th>
+                <th>Item Level</th>
+                <th>ID</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="characters-table"></tbody>
+          </table>
+        </section>
       </section>
 
-      <section class="panel">
-        <h2>Create Character</h2>
-        <form id="character-form">
-          <label>
-            Player
-            <select id="character-player" required></select>
-          </label>
-          <label>
-            Character Name
-            <input id="character-name" type="text" required />
-          </label>
-          <label>
-            Role
-            <select id="character-role" required>
-              <option value="DPS">DPS</option>
-              <option value="Support">Support</option>
-              <option value="DPS/Support">DPS/Support</option>
-            </select>
-          </label>
-          <label>
-            Item Level
-            <input id="character-ilvl" type="number" min="1" required />
-          </label>
-          <button type="submit">Add Character</button>
-        </form>
+      <section class="tab-panel" data-tab="raids">
+        <section class="panel">
+          <h2>Create Raid</h2>
+          <form id="raid-form">
+            <label>
+              Name
+              <input id="raid-name" type="text" required />
+            </label>
+            <label>
+              Difficulty
+              <select id="raid-difficulty" required>
+                <option value="Normal">Normal</option>
+                <option value="Hard">Hard</option>
+                <option value="Nightmare">Nightmare</option>
+              </select>
+            </label>
+            <label>
+              Item Level Requirement
+              <input id="raid-ilvl" type="number" min="1" required />
+            </label>
+            <label>
+              Duration Minutes
+              <input id="raid-duration" type="number" min="1" max="1440" required />
+            </label>
+            <button type="submit">Add Raid</button>
+          </form>
+        </section>
+
+        <section class="panel">
+          <h2>Raids</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Difficulty</th>
+                <th>Item Level</th>
+                <th>Duration</th>
+                <th>ID</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="raids-table"></tbody>
+          </table>
+        </section>
       </section>
 
-      <section class="panel">
-        <h2>Players</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>ID</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="players-table"></tbody>
-        </table>
-      </section>
+      <section class="tab-panel" data-tab="availability">
+        <section class="panel">
+          <h2>Create Availability Window</h2>
+          <form id="availability-form">
+            <label>
+              Player
+              <select id="availability-player" required></select>
+            </label>
+            <label>
+              Day
+              <select id="availability-day" required>
+                <option value="0">Sunday</option>
+                <option value="1">Monday</option>
+                <option value="2">Tuesday</option>
+                <option value="3">Wednesday</option>
+                <option value="4">Thursday</option>
+                <option value="5">Friday</option>
+                <option value="6">Saturday</option>
+              </select>
+            </label>
+            <label>
+              Start Minute
+              <input id="availability-start" type="number" min="0" max="1439" required />
+            </label>
+            <label>
+              End Minute
+              <input id="availability-end" type="number" min="1" max="1440" required />
+            </label>
+            <button type="submit">Add Availability</button>
+          </form>
+        </section>
 
-      <section class="panel">
-        <h2>Characters</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Player</th>
-              <th>Role</th>
-              <th>Item Level</th>
-              <th>ID</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="characters-table"></tbody>
-        </table>
+        <section class="panel">
+          <h2>Availability Windows</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Player</th>
+                <th>Day</th>
+                <th>Start</th>
+                <th>End</th>
+                <th>ID</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="availability-table"></tbody>
+          </table>
+        </section>
       </section>
 
       <p id="status" class="status"></p>

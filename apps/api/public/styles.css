@@ -15,6 +15,32 @@ body {
   padding: 24px;
 }
 
+.tabs {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.tab {
+  border: 1px solid #c7d2df;
+  background: #e7edf4;
+  border-radius: 8px;
+}
+
+.tab.is-active {
+  background: #1f6fb2;
+  color: #fff;
+  border-color: #1f6fb2;
+}
+
+.tab-panel {
+  display: none;
+}
+
+.tab-panel.is-active {
+  display: block;
+}
+
 h1 {
   margin: 0;
 }

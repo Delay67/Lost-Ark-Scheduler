@@ -111,10 +111,80 @@ export class Store {
     return raid;
   }
 
+  async updateRaid(
+    id: string,
+    patch: {
+      name?: string;
+      difficulty?: RaidInstance["difficulty"];
+      itemLevelRequirement?: number;
+      durationMinutes?: number;
+    }
+  ): Promise<RaidInstance | null> {
+    const data = await this.load();
+    const index = data.raids.findIndex((r) => r.id === id);
+    if (index < 0) {
+      return null;
+    }
+
+    const current = data.raids[index];
+    data.raids[index] = {
+      ...current,
+      ...patch
+    };
+    await this.save(data);
+    return data.raids[index];
+  }
+
+  async deleteRaid(id: string): Promise<boolean> {
+    const data = await this.load();
+    const beforeCount = data.raids.length;
+    data.raids = data.raids.filter((r) => r.id !== id);
+    if (data.raids.length === beforeCount) {
+      return false;
+    }
+    await this.save(data);
+    return true;
+  }
+
   async addAvailability(window: AvailabilityWindow): Promise<AvailabilityWindow> {
     const data = await this.load();
     data.availabilityWindows.push(window);
     await this.save(data);
     return window;
+  }
+
+  async updateAvailability(
+    id: string,
+    patch: {
+      playerId?: string;
+      dayOfWeek?: number;
+      startMinute?: number;
+      endMinute?: number;
+    }
+  ): Promise<AvailabilityWindow | null> {
+    const data = await this.load();
+    const index = data.availabilityWindows.findIndex((w) => w.id === id);
+    if (index < 0) {
+      return null;
+    }
+
+    const current = data.availabilityWindows[index];
+    data.availabilityWindows[index] = {
+      ...current,
+      ...patch
+    };
+    await this.save(data);
+    return data.availabilityWindows[index];
+  }
+
+  async deleteAvailability(id: string): Promise<boolean> {
+    const data = await this.load();
+    const beforeCount = data.availabilityWindows.length;
+    data.availabilityWindows = data.availabilityWindows.filter((w) => w.id !== id);
+    if (data.availabilityWindows.length === beforeCount) {
+      return false;
+    }
+    await this.save(data);
+    return true;
   }
 }
