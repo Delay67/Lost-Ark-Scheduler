@@ -6,6 +6,13 @@ const availabilityTable = document.getElementById("availability-table");
 const scheduleGrid = document.getElementById("schedule-grid");
 const scheduleSummary = document.getElementById("schedule-summary");
 const generateScheduleButton = document.getElementById("generate-schedule");
+const scheduleAttemptsInput = document.getElementById("schedule-attempts");
+const scheduleSeedInput = document.getElementById("schedule-seed");
+const scheduleEarlyStopInput = document.getElementById("schedule-early-stop");
+const randomizeScheduleSeedButton = document.getElementById("randomize-schedule-seed");
+const scheduleProgressWrap = document.getElementById("schedule-progress-wrap");
+const scheduleProgressBar = document.getElementById("schedule-progress");
+const scheduleProgressText = document.getElementById("schedule-progress-text");
 const characterPlayerSelect = document.getElementById("character-player");
 const availabilityPlayerSelect = document.getElementById("availability-player");
 
@@ -74,6 +81,82 @@ async function api(path, options = {}) {
   }
 
   return response.json();
+}
+
+function randomUint32() {
+  return Math.floor(Math.random() * 0x100000000) >>> 0;
+}
+
+function buildScheduleGenerationPayload() {
+  const attemptsRaw = Number(scheduleAttemptsInput?.value ?? "1000");
+  const attempts = Number.isInteger(attemptsRaw) ? Math.max(1, Math.min(5000, attemptsRaw)) : 1000;
+
+  const earlyStopRaw = Number(scheduleEarlyStopInput?.value ?? "250");
+  const earlyStopNoImproveAttempts = Number.isInteger(earlyStopRaw)
+    ? Math.max(1, Math.min(5000, earlyStopRaw))
+    : 250;
+
+  const seedText = String(scheduleSeedInput?.value ?? "").trim();
+  let seed;
+  if (seedText.length > 0) {
+    const parsedSeed = Number(seedText);
+    if (!Number.isInteger(parsedSeed) || parsedSeed < 0 || parsedSeed > 4294967295) {
+      throw new Error("Seed must be an integer from 0 to 4294967295.");
+    }
+    seed = parsedSeed;
+  } else {
+    seed = randomUint32();
+    if (scheduleSeedInput) {
+      scheduleSeedInput.value = String(seed);
+    }
+  }
+
+  if (scheduleAttemptsInput && String(attempts) !== String(scheduleAttemptsInput.value)) {
+    scheduleAttemptsInput.value = String(attempts);
+  }
+  if (scheduleEarlyStopInput && String(earlyStopNoImproveAttempts) !== String(scheduleEarlyStopInput.value)) {
+    scheduleEarlyStopInput.value = String(earlyStopNoImproveAttempts);
+  }
+
+  return { attempts, seed, earlyStopNoImproveAttempts };
+}
+
+function setScheduleProgress(completedAttempts, totalAttempts) {
+  if (!scheduleProgressWrap || !scheduleProgressBar || !scheduleProgressText) {
+    return;
+  }
+
+  const safeTotal = Math.max(1, Number(totalAttempts) || 1);
+  const safeCompleted = Math.max(0, Math.min(safeTotal, Number(completedAttempts) || 0));
+
+  scheduleProgressWrap.classList.remove("hidden");
+  scheduleProgressBar.max = safeTotal;
+  scheduleProgressBar.value = safeCompleted;
+  scheduleProgressText.textContent = `${safeCompleted} / ${safeTotal} attempts`;
+}
+
+function hideScheduleProgress() {
+  if (!scheduleProgressWrap) {
+    return;
+  }
+  scheduleProgressWrap.classList.add("hidden");
+}
+
+async function waitForScheduleProgressJob(jobId) {
+  while (true) {
+    const status = await api(`/schedules/generate-progress/${jobId}`);
+    setScheduleProgress(status.completedAttempts ?? 0, status.attempts ?? 1);
+
+    if (status.state === "completed") {
+      return status;
+    }
+
+    if (status.state === "failed") {
+      throw new Error(status.error || "Schedule generation failed.");
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
 }
 
 function buildPlayerSelect(players) {
@@ -930,29 +1013,49 @@ generateScheduleButton.addEventListener("click", async () => {
   generateScheduleButton.textContent = "Generating...";
 
   try {
-    const [grid, scheduleResult, data] = await Promise.all([
-      api("/schedules/grid", {
-        method: "POST",
-        body: JSON.stringify({})
-      }),
-      api("/schedules/generate", {
-        method: "POST",
-        body: JSON.stringify({})
-      }),
-      api("/data")
-    ]);
+    const payload = buildScheduleGenerationPayload();
+    setScheduleProgress(0, payload.attempts);
+
+    const started = await api("/schedules/generate-progress/start", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+
+    if (scheduleSeedInput) {
+      scheduleSeedInput.value = String(started.seed);
+    }
+
+    const finished = await waitForScheduleProgressJob(started.jobId);
+    const grid = finished.grid;
+    const scheduleResult = finished.result;
+    const data = finished.data;
+
+    if (!grid || !scheduleResult || !data) {
+      throw new Error("Schedule generation completed but result payload is incomplete.");
+    }
 
     currentGridModel = JSON.parse(JSON.stringify(grid));
     renderScheduleGrid(currentGridModel);
     renderScheduleSummary(data, scheduleResult);
-    setStatus("Schedule grid generated.");
+    setStatus(`Schedule grid generated using ${started.attempts} attempts (seed ${started.seed}).`);
   } catch (error) {
     setStatus(error.message, true);
   } finally {
+    hideScheduleProgress();
     generateScheduleButton.disabled = false;
     generateScheduleButton.textContent = "Generate Schedule Grid";
   }
 });
+
+if (randomizeScheduleSeedButton) {
+  randomizeScheduleSeedButton.addEventListener("click", () => {
+    if (!scheduleSeedInput) {
+      return;
+    }
+    scheduleSeedInput.value = String(randomUint32());
+    setStatus("Seed randomized.");
+  });
+}
 
 scheduleGrid.addEventListener("click", (event) => {
   const noteCell = event.target.closest("td.note-cell");

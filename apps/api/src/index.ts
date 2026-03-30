@@ -1,15 +1,25 @@
 import express from "express";
+import { randomUUID } from "node:crypto";
+import { cpus } from "node:os";
+import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   AvailabilityWindowCreateSchema,
   CharacterCreateSchema,
+  type DataStore,
   GenerateScheduleInputSchema,
+  type ScheduleResult,
   RoleSchema,
   PlayerCreateSchema,
   RaidCreateSchema
 } from "@las/shared";
-import { generateWeeklySchedule } from "@las/scheduler";
+import {
+  generateWeeklySchedule,
+  isScheduleQualityBetter,
+  scoreScheduleQuality,
+  type ScheduleQuality
+} from "@las/scheduler";
 import { z } from "zod";
 import { toWeeklyGrid } from "./grid.js";
 import { newId } from "./ids.js";
@@ -23,6 +33,189 @@ const dirName = dirname(fileName);
 app.use(express.static(join(dirName, "../public")));
 
 const store = new Store("data/store.json");
+
+const ScheduleGenerationOptionsSchema = z.object({
+  data: GenerateScheduleInputSchema.optional(),
+  attempts: z.number().int().min(1).max(5000).optional(),
+  seed: z.number().int().min(0).max(4294967295).optional(),
+  earlyStopNoImproveAttempts: z.number().int().min(1).max(5000).optional()
+});
+
+type ScheduleProgressJob = {
+  id: string;
+  state: "running" | "completed" | "failed";
+  attempts: number;
+  completedAttempts: number;
+  seed: number;
+  result?: ReturnType<typeof generateWeeklySchedule>;
+  grid?: ReturnType<typeof toWeeklyGrid>;
+  data?: DataStore;
+  error?: string;
+};
+
+const scheduleProgressJobs = new Map<string, ScheduleProgressJob>();
+
+const WORKER_HASH_STEP = 0x9e3779b9;
+
+type WorkerDonePayload = {
+  result: ScheduleResult;
+  quality: ScheduleQuality;
+};
+
+function getWorkerCount(attempts: number): number {
+  const cpuCount = Math.max(1, cpus().length || 1);
+  return Math.max(1, Math.min(attempts, cpuCount));
+}
+
+async function generateWeeklyScheduleParallel(
+  input: DataStore,
+  attempts: number,
+  seed: number,
+  earlyStopNoImproveAttempts: number | undefined,
+  onAttemptCompleted: (completedAttempts: number, totalAttempts: number) => void
+): Promise<ScheduleResult> {
+  const workerCount = getWorkerCount(attempts);
+
+  if (workerCount <= 1 || attempts <= 1) {
+    return generateWeeklySchedule(input, {
+      attempts,
+      seed,
+      earlyStopNoImproveAttempts,
+      onAttemptCompleted
+    });
+  }
+
+  const baseChunk = Math.floor(attempts / workerCount);
+  const remainder = attempts % workerCount;
+  const chunks: number[] = [];
+  for (let i = 0; i < workerCount; i += 1) {
+    chunks.push(baseChunk + (i < remainder ? 1 : 0));
+  }
+
+  let globalBestResult: ScheduleResult | null = null;
+  let globalBestQuality: ScheduleQuality | null = null;
+  let totalCompletedAttempts = 0;
+  let globalTargetAttempts = attempts;
+
+  const workerScript = `
+    const { parentPort, workerData } = require('node:worker_threads');
+
+    (async () => {
+      const { generateWeeklySchedule, scoreScheduleQuality } = await import('@las/scheduler');
+      const { input, attempts, seed, earlyStopNoImproveAttempts } = workerData;
+
+      const result = generateWeeklySchedule(input, {
+        attempts,
+        seed,
+        earlyStopNoImproveAttempts,
+        onAttemptCompleted: (completedAttempts, totalAttempts) => {
+          parentPort.postMessage({ type: 'progress', completedAttempts, totalAttempts });
+        }
+      });
+
+      const quality = scoreScheduleQuality(input, result);
+      parentPort.postMessage({ type: 'done', result, quality });
+    })().catch((error) => {
+      parentPort.postMessage({ type: 'error', error: error && error.message ? error.message : String(error) });
+    });
+  `;
+
+  await Promise.all(chunks.map((chunkAttempts, workerIndex) => new Promise<void>((resolve, reject) => {
+    if (chunkAttempts <= 0) {
+      resolve();
+      return;
+    }
+
+    const workerSeed = (seed + Math.imul(workerIndex, WORKER_HASH_STEP)) >>> 0;
+    const worker = new Worker(workerScript, {
+      eval: true,
+      workerData: {
+        input,
+        attempts: chunkAttempts,
+        seed: workerSeed,
+        earlyStopNoImproveAttempts
+      }
+    });
+
+    let previousCompleted = 0;
+    let workerTargetAttempts = chunkAttempts;
+
+    worker.on("message", (message: unknown) => {
+      const payload = message as {
+        type?: string;
+        completedAttempts?: number;
+        totalAttempts?: number;
+        error?: string;
+        result?: ScheduleResult;
+        quality?: ScheduleQuality;
+      };
+
+      if (payload.type === "progress") {
+        const nextWorkerTarget = Math.max(1, Math.min(chunkAttempts, payload.totalAttempts ?? workerTargetAttempts));
+        if (nextWorkerTarget !== workerTargetAttempts) {
+          globalTargetAttempts += nextWorkerTarget - workerTargetAttempts;
+          workerTargetAttempts = nextWorkerTarget;
+          if (previousCompleted > workerTargetAttempts) {
+            previousCompleted = workerTargetAttempts;
+          }
+        }
+
+        const nextCompleted = Math.max(0, Math.min(workerTargetAttempts, payload.completedAttempts ?? 0));
+        const delta = Math.max(0, nextCompleted - previousCompleted);
+        previousCompleted = nextCompleted;
+        if (delta > 0) {
+          totalCompletedAttempts += delta;
+          onAttemptCompleted(totalCompletedAttempts, globalTargetAttempts);
+        }
+        return;
+      }
+
+      if (payload.type === "done") {
+        if (previousCompleted < workerTargetAttempts) {
+          totalCompletedAttempts += workerTargetAttempts - previousCompleted;
+          previousCompleted = workerTargetAttempts;
+          onAttemptCompleted(totalCompletedAttempts, globalTargetAttempts);
+        }
+
+        if (!payload.result || !payload.quality) {
+          reject(new Error("Worker returned incomplete schedule payload."));
+          return;
+        }
+
+        const donePayload: WorkerDonePayload = {
+          result: payload.result,
+          quality: payload.quality
+        };
+        if (!globalBestResult || !globalBestQuality || isScheduleQualityBetter(donePayload.quality, globalBestQuality)) {
+          globalBestResult = donePayload.result;
+          globalBestQuality = donePayload.quality;
+        }
+      }
+
+      if (payload.type === "error") {
+        reject(new Error(payload.error || "Worker failed during schedule generation."));
+      }
+    });
+
+    worker.on("error", (error) => {
+      reject(error);
+    });
+
+    worker.on("exit", (code) => {
+      if (code !== 0) {
+        reject(new Error(`Schedule worker exited with code ${code}.`));
+        return;
+      }
+      resolve();
+    });
+  })));
+
+  if (!globalBestResult || !globalBestQuality) {
+    throw new Error("Parallel schedule generation produced no result.");
+  }
+
+  return globalBestResult;
+}
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
@@ -266,18 +459,116 @@ app.post("/schedules/generate", async (req, res) => {
     return res.json(generateWeeklySchedule(fromRequest.data));
   }
 
+  const withOptions = ScheduleGenerationOptionsSchema.safeParse(req.body ?? {});
+  if (withOptions.success) {
+    const data = withOptions.data.data ?? (await store.load());
+    return res.json(generateWeeklySchedule(data, {
+      attempts: withOptions.data.attempts,
+      seed: withOptions.data.seed,
+      earlyStopNoImproveAttempts: withOptions.data.earlyStopNoImproveAttempts
+    }));
+  }
+
   if (req.body && Object.keys(req.body).length > 0) {
     return res.status(400).json({
-      error: "If request body is provided, it must contain players, characters, raids, and availabilityWindows"
+      error: "Request body must be scheduler input data or options: attempts/seed (optional with optional data payload)."
     });
   }
 
   const data = await store.load();
-  return res.json(generateWeeklySchedule(data));
+  return res.json(generateWeeklySchedule(data, { attempts: 1000 }));
+});
+
+app.post("/schedules/generate-progress/start", async (req, res) => {
+  const parsed = ScheduleGenerationOptionsSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const payload = parsed.data;
+  const data = payload.data ?? (await store.load());
+  const attempts = payload.attempts ?? 1000;
+  const seed = payload.seed ?? (Math.floor(Math.random() * 0x100000000) >>> 0);
+  const earlyStopNoImproveAttempts = payload.earlyStopNoImproveAttempts;
+
+  const jobId = randomUUID();
+  const job: ScheduleProgressJob = {
+    id: jobId,
+    state: "running",
+    attempts,
+    completedAttempts: 0,
+    seed
+  };
+  scheduleProgressJobs.set(jobId, job);
+
+  void (async () => {
+    try {
+      const result = await generateWeeklyScheduleParallel(
+        data,
+        attempts,
+        seed,
+        earlyStopNoImproveAttempts,
+        (completedAttempts, totalAttempts) => {
+        const current = scheduleProgressJobs.get(jobId);
+        if (!current) {
+          return;
+        }
+        current.completedAttempts = completedAttempts;
+        current.attempts = totalAttempts;
+        }
+      );
+
+      const current = scheduleProgressJobs.get(jobId);
+      if (!current) {
+        return;
+      }
+
+      current.result = result;
+      current.data = data;
+      current.grid = toWeeklyGrid(data, result, {});
+      current.completedAttempts = current.attempts;
+      current.state = "completed";
+    } catch (error) {
+      const current = scheduleProgressJobs.get(jobId);
+      if (!current) {
+        return;
+      }
+      current.state = "failed";
+      current.error = error instanceof Error ? error.message : "Unknown schedule generation error.";
+    }
+  })();
+
+  return res.json({
+    jobId,
+    attempts,
+    seed
+  });
+});
+
+app.get("/schedules/generate-progress/:jobId", (req, res) => {
+  const job = scheduleProgressJobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: "Schedule generation job not found." });
+  }
+
+  return res.json({
+    jobId: job.id,
+    state: job.state,
+    attempts: job.attempts,
+    completedAttempts: job.completedAttempts,
+    seed: job.seed,
+    error: job.error,
+    result: job.state === "completed" ? job.result : undefined,
+    grid: job.state === "completed" ? job.grid : undefined,
+    data: job.state === "completed" ? job.data : undefined
+  });
 });
 
 const GenerateGridSchema = z.object({
   data: GenerateScheduleInputSchema.optional(),
+  attempts: z.number().int().min(1).max(5000).optional(),
+  seed: z.number().int().min(0).max(4294967295).optional(),
+  earlyStopNoImproveAttempts: z.number().int().min(1).max(5000).optional(),
   corePlayerOrder: z.array(z.string().min(1)).optional(),
   weekStartDay: z.number().int().min(0).max(6).optional()
 });
@@ -290,7 +581,11 @@ app.post("/schedules/grid", async (req, res) => {
 
   const payload = parsed.data;
   const data = payload.data ?? (await store.load());
-  const generated = generateWeeklySchedule(data);
+  const generated = generateWeeklySchedule(data, {
+    attempts: payload.attempts,
+    seed: payload.seed,
+    earlyStopNoImproveAttempts: payload.earlyStopNoImproveAttempts
+  });
 
   return res.json(
     toWeeklyGrid(data, generated, {

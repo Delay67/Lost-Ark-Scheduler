@@ -197,6 +197,25 @@
         <section class="panel">
           <h2>Generate Weekly Schedule</h2>
           <p>Build the latest schedule from current data and display it in a spreadsheet-style grid.</p>
+          <div class="schedule-options">
+            <label>
+              Attempts
+              <input id="schedule-attempts" type="number" min="1" max="5000" value="1000" />
+            </label>
+            <label>
+              Seed (optional)
+              <input id="schedule-seed" type="number" min="0" max="4294967295" placeholder="Random if blank" />
+            </label>
+            <label>
+              Early Stop Patience
+              <input id="schedule-early-stop" type="number" min="1" max="5000" value="250" />
+            </label>
+            <button id="randomize-schedule-seed" type="button">Randomize Seed</button>
+          </div>
+          <div id="schedule-progress-wrap" class="schedule-progress hidden" aria-live="polite">
+            <progress id="schedule-progress" max="1000" value="0"></progress>
+            <span id="schedule-progress-text">0 / 1000 attempts</span>
+          </div>
           <button id="generate-schedule">Generate Schedule Grid</button>
         </section>
 

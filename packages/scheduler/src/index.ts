@@ -31,6 +31,15 @@ const SOFT_MAX_RAIDS_PER_DAY = 8;
 const SOFT_MAX_SAME_RAID_STREAK = 2;
 const SOFT_DEADTIME_MAX_GAP_TOLERANCE_MINUTES = 20;
 const SOFT_DEADTIME_TOTAL_GAP_TOLERANCE_MINUTES = 40;
+const DEFAULT_MULTI_ATTEMPTS = 1000;
+const MAX_MULTI_ATTEMPTS = 5000;
+
+export type GenerateWeeklyScheduleOptions = {
+  attempts?: number;
+  seed?: number;
+  earlyStopNoImproveAttempts?: number;
+  onAttemptCompleted?: (completedAttempts: number, totalAttempts: number) => void;
+};
 
 const RAID_PARTY_SIZE_RULES: Array<{ match: RegExp; capacity: PartySize }> = [
   { match: /kayangel|ivory|voldis/i, capacity: 4 }
@@ -47,6 +56,173 @@ function partySizeForRaid(raid: RaidInstance): PartySize {
 
 function normalizeRaidName(name: string): string {
   return name.trim().toLowerCase();
+}
+
+function normalizeSeed(seed: number): number {
+  if (!Number.isFinite(seed)) {
+    return 0;
+  }
+  return (Math.floor(seed) >>> 0);
+}
+
+function randomSeed(): number {
+  return Math.floor(Math.random() * 0x100000000) >>> 0;
+}
+
+function clampAttempts(attempts: number | undefined): number {
+  if (attempts === undefined) {
+    return DEFAULT_MULTI_ATTEMPTS;
+  }
+  if (!Number.isFinite(attempts)) {
+    return DEFAULT_MULTI_ATTEMPTS;
+  }
+  const normalized = Math.floor(attempts);
+  return Math.max(1, Math.min(MAX_MULTI_ATTEMPTS, normalized));
+}
+
+function clampEarlyStopNoImproveAttempts(value: number | undefined): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Number.isFinite(value)) {
+    return undefined;
+  }
+  const normalized = Math.floor(value);
+  if (normalized <= 0) {
+    return undefined;
+  }
+  return normalized;
+}
+
+function hashStringToUint32(input: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function randomUnitFromKey(seed: number, key: string): number {
+  const hashed = hashStringToUint32(`${seed}|${key}`);
+  return hashed / 0x100000000;
+}
+
+export type ScheduleQuality = {
+  leftOutRequiredCount: number;
+  assignedCount: number;
+  underfilledCount: number;
+  maxGapMinutes: number;
+  totalGapMinutes: number;
+};
+
+function buildRequiredRaidIdsByCharacter(input: GenerateScheduleInput): Map<string, string[]> {
+  const raids = [...input.raids].sort((a, b) => {
+    if (b.itemLevelRequirement !== a.itemLevelRequirement) {
+      return b.itemLevelRequirement - a.itemLevelRequirement;
+    }
+    return a.id.localeCompare(b.id);
+  });
+
+  const requiredRaidIdsByCharacter = new Map<string, string[]>();
+  for (const character of input.characters) {
+    const seenRaidNames = new Set<string>();
+    const requiredRaidIds: string[] = [];
+    const optedOut = new Set(character.raidOptOutRaidIds ?? []);
+
+    for (const raid of raids) {
+      if (character.itemLevel < raid.itemLevelRequirement) {
+        continue;
+      }
+
+      const nameKey = normalizeRaidName(raid.name);
+      if (seenRaidNames.has(nameKey)) {
+        continue;
+      }
+      seenRaidNames.add(nameKey);
+
+      if (!optedOut.has(raid.id)) {
+        requiredRaidIds.push(raid.id);
+      }
+
+      if (requiredRaidIds.length >= MAX_RAIDS_PER_CHARACTER) {
+        break;
+      }
+    }
+
+    requiredRaidIdsByCharacter.set(character.id, requiredRaidIds);
+  }
+
+  return requiredRaidIdsByCharacter;
+}
+
+function scoreScheduleQualityWithRequiredMap(
+  requiredRaidIdsByCharacter: Map<string, string[]>,
+  result: ScheduleResult
+): ScheduleQuality {
+  const assignedRaidIdsByCharacter = new Map<string, Set<string>>();
+  let assignedCount = 0;
+
+  for (const raidSchedule of result.raidSchedules) {
+    for (const assignment of raidSchedule.assignments) {
+      const setForCharacter = assignedRaidIdsByCharacter.get(assignment.characterId) ?? new Set<string>();
+      setForCharacter.add(assignment.raidId);
+      assignedRaidIdsByCharacter.set(assignment.characterId, setForCharacter);
+      assignedCount += 1;
+    }
+  }
+
+  let leftOutRequiredCount = 0;
+  for (const [characterId, requiredRaidIds] of requiredRaidIdsByCharacter.entries()) {
+    const assignedRaidIds = assignedRaidIdsByCharacter.get(characterId) ?? new Set<string>();
+    for (const raidId of requiredRaidIds) {
+      if (!assignedRaidIds.has(raidId)) {
+        leftOutRequiredCount += 1;
+      }
+    }
+  }
+
+  const underfilledCount = result.raidSchedules.reduce((count, raidSchedule) => (
+    count + (raidSchedule.assignments.length < raidSchedule.raid.capacity ? 1 : 0)
+  ), 0);
+
+  const deadtime = result.playerDeadtime.reduce((acc, summary) => {
+    acc.maxGapMinutes = Math.max(acc.maxGapMinutes, summary.largestGapMinutes);
+    acc.totalGapMinutes += summary.totalGapMinutes;
+    return acc;
+  }, { maxGapMinutes: 0, totalGapMinutes: 0 });
+
+  return {
+    leftOutRequiredCount,
+    assignedCount,
+    underfilledCount,
+    maxGapMinutes: deadtime.maxGapMinutes,
+    totalGapMinutes: deadtime.totalGapMinutes
+  };
+}
+
+export function scoreScheduleQuality(input: GenerateScheduleInput, result: ScheduleResult): ScheduleQuality {
+  const requiredRaidIdsByCharacter = buildRequiredRaidIdsByCharacter(input);
+  return scoreScheduleQualityWithRequiredMap(requiredRaidIdsByCharacter, result);
+}
+
+export function isScheduleQualityBetter(candidate: ScheduleQuality, currentBest: ScheduleQuality): boolean {
+  if (candidate.leftOutRequiredCount !== currentBest.leftOutRequiredCount) {
+    return candidate.leftOutRequiredCount < currentBest.leftOutRequiredCount;
+  }
+  if (candidate.assignedCount !== currentBest.assignedCount) {
+    return candidate.assignedCount > currentBest.assignedCount;
+  }
+  if (candidate.underfilledCount !== currentBest.underfilledCount) {
+    return candidate.underfilledCount < currentBest.underfilledCount;
+  }
+  if (candidate.maxGapMinutes !== currentBest.maxGapMinutes) {
+    return candidate.maxGapMinutes < currentBest.maxGapMinutes;
+  }
+  if (candidate.totalGapMinutes !== currentBest.totalGapMinutes) {
+    return candidate.totalGapMinutes < currentBest.totalGapMinutes;
+  }
+  return false;
 }
 
 function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {
@@ -308,6 +484,7 @@ function buildCandidateSlots(
 function evaluateSlot(
   raid: RaidInstance,
   slot: TimeSlot,
+  attemptSeed: number,
   characters: Character[],
   adminPlayerId: string | undefined,
   vipPriorityCharacterIds: Set<string>,
@@ -363,6 +540,51 @@ function evaluateSlot(
     return true;
   });
 
+  const raidEnd = scheduledRaid.startMinute + scheduledRaid.durationMinutes;
+  const playerDeficitByPlayerId = new Map<string, number>();
+  const seenPlayers = new Set<string>();
+  for (const candidate of candidates) {
+    if (seenPlayers.has(candidate.playerId)) {
+      continue;
+    }
+    seenPlayers.add(candidate.playerId);
+
+    const requiredCharIds = requiredCharacterIdsByPlayerRaid.get(`${candidate.playerId}|${raid.id}`) ?? new Set<string>();
+    if (requiredCharIds.size === 0) {
+      playerDeficitByPlayerId.set(candidate.playerId, 0);
+      continue;
+    }
+
+    let assignedForRaid = 0;
+    const playerCharIds = characterIdsByPlayer.get(candidate.playerId) ?? [];
+    for (const charId of playerCharIds) {
+      const assignedRaidIds = assignedRaidIdsByCharacter.get(charId);
+      if (assignedRaidIds?.has(raid.id)) {
+        assignedForRaid += 1;
+      }
+    }
+
+    playerDeficitByPlayerId.set(candidate.playerId, requiredCharIds.size - assignedForRaid);
+  }
+
+  const projectedDeadtimeByCharacter = new Map<string, { largestGapMinutes: number; totalGapMinutes: number }>();
+  const contiguityByCharacter = new Map<string, number>();
+  const randomByCharacter = new Map<string, number>();
+  for (const candidate of candidates) {
+    const slots = assignmentsByPlayer.get(candidate.playerId) ?? [];
+    projectedDeadtimeByCharacter.set(candidate.id, summarizeSinglePlayerIntraDayDeadtime([
+      ...slots,
+      {
+        raidId: raid.id,
+        dayOfWeek: scheduledRaid.dayOfWeek,
+        startMinute: scheduledRaid.startMinute,
+        endMinute: raidEnd
+      }
+    ]));
+    contiguityByCharacter.set(candidate.id, contiguityScore(slots, scheduledRaid));
+    randomByCharacter.set(candidate.id, randomUnitFromKey(attemptSeed, `character:${candidate.id}`));
+  }
+
   const sortedCandidates = [...candidates].sort((a, b) => {
     const aVipPriority = vipPriorityCharacterIds.has(a.id) ? 1 : 0;
     const bVipPriority = vipPriorityCharacterIds.has(b.id) ? 1 : 0;
@@ -370,52 +592,14 @@ function evaluateSlot(
       return bVipPriority - aVipPriority;
     }
 
-    const deficitForPlayer = (playerId: string): number => {
-      const requiredCharIds = requiredCharacterIdsByPlayerRaid.get(`${playerId}|${raid.id}`) ?? new Set<string>();
-      if (requiredCharIds.size === 0) {
-        return 0;
-      }
-
-      let assignedForRaid = 0;
-      const playerCharIds = characterIdsByPlayer.get(playerId) ?? [];
-      for (const charId of playerCharIds) {
-        const assignedRaidIds = assignedRaidIdsByCharacter.get(charId);
-        if (assignedRaidIds?.has(raid.id)) {
-          assignedForRaid += 1;
-        }
-      }
-
-      return requiredCharIds.size - assignedForRaid;
-    };
-
-    const aDeficit = deficitForPlayer(a.playerId);
-    const bDeficit = deficitForPlayer(b.playerId);
+    const aDeficit = playerDeficitByPlayerId.get(a.playerId) ?? 0;
+    const bDeficit = playerDeficitByPlayerId.get(b.playerId) ?? 0;
     if (aDeficit !== bDeficit) {
       return bDeficit - aDeficit;
     }
 
-    const aSlots = assignmentsByPlayer.get(a.playerId) ?? [];
-    const bSlots = assignmentsByPlayer.get(b.playerId) ?? [];
-
-    const raidEnd = scheduledRaid.startMinute + scheduledRaid.durationMinutes;
-    const aProjected = summarizeSinglePlayerIntraDayDeadtime([
-      ...aSlots,
-      {
-        raidId: raid.id,
-        dayOfWeek: scheduledRaid.dayOfWeek,
-        startMinute: scheduledRaid.startMinute,
-        endMinute: raidEnd
-      }
-    ]);
-    const bProjected = summarizeSinglePlayerIntraDayDeadtime([
-      ...bSlots,
-      {
-        raidId: raid.id,
-        dayOfWeek: scheduledRaid.dayOfWeek,
-        startMinute: scheduledRaid.startMinute,
-        endMinute: raidEnd
-      }
-    ]);
+    const aProjected = projectedDeadtimeByCharacter.get(a.id) ?? { largestGapMinutes: 0, totalGapMinutes: 0 };
+    const bProjected = projectedDeadtimeByCharacter.get(b.id) ?? { largestGapMinutes: 0, totalGapMinutes: 0 };
 
     if (aProjected.largestGapMinutes !== bProjected.largestGapMinutes) {
       return aProjected.largestGapMinutes - bProjected.largestGapMinutes;
@@ -425,15 +609,87 @@ function evaluateSlot(
       return aProjected.totalGapMinutes - bProjected.totalGapMinutes;
     }
 
-    const scoreDiff = contiguityScore(bSlots, scheduledRaid) - contiguityScore(aSlots, scheduledRaid);
+    const scoreDiff = (contiguityByCharacter.get(b.id) ?? 0) - (contiguityByCharacter.get(a.id) ?? 0);
     if (scoreDiff !== 0) {
       return scoreDiff;
     }
     if (a.itemLevel !== b.itemLevel) {
       return a.itemLevel - b.itemLevel;
     }
+    const aRandom = randomByCharacter.get(a.id) ?? 0;
+    const bRandom = randomByCharacter.get(b.id) ?? 0;
+    if (aRandom !== bRandom) {
+      return aRandom - bRandom;
+    }
     return a.id.localeCompare(b.id);
   });
+
+  const candidateBaseOrder = new Map<string, number>();
+  for (let i = 0; i < sortedCandidates.length; i += 1) {
+    candidateBaseOrder.set(sortedCandidates[i].id, i);
+  }
+
+  const preferFlexForSupport = randomUnitFromKey(
+    attemptSeed,
+    `flex-priority:${raid.id}:${slot.dayOfWeek}:${slot.startMinute}:support`
+  ) < 0.5;
+  const preferFlexForDps = randomUnitFromKey(
+    attemptSeed,
+    `flex-priority:${raid.id}:${slot.dayOfWeek}:${slot.startMinute}:dps`
+  ) < 0.5;
+
+  const rolePriorityForCandidate = (character: Character, neededRole: "DPS" | "Support"): number => {
+    const isFlex = character.role === "DPS/Support";
+    if (!isFlex) {
+      return 1;
+    }
+
+    if (neededRole === "Support") {
+      return preferFlexForSupport ? 0 : 2;
+    }
+
+    return preferFlexForDps ? 0 : 2;
+  };
+
+  const flexRoleRandomByCharacter = new Map<string, { support: number; dps: number }>();
+  for (const candidate of sortedCandidates) {
+    if (candidate.role !== "DPS/Support") {
+      continue;
+    }
+    flexRoleRandomByCharacter.set(candidate.id, {
+      support: randomUnitFromKey(attemptSeed, `flex-order:Support:${candidate.id}`),
+      dps: randomUnitFromKey(attemptSeed, `flex-order:DPS:${candidate.id}`)
+    });
+  }
+
+  const candidatesForRole = (neededRole: "DPS" | "Support"): Character[] => (
+    sortedCandidates
+      .filter((c) => canTakeRole(c.role, neededRole))
+      .sort((a, b) => {
+        const aPriority = rolePriorityForCandidate(a, neededRole);
+        const bPriority = rolePriorityForCandidate(b, neededRole);
+        if (aPriority !== bPriority) {
+          return aPriority - bPriority;
+        }
+
+        const aIsFlex = a.role === "DPS/Support";
+        const bIsFlex = b.role === "DPS/Support";
+        if (aIsFlex && bIsFlex) {
+          const aFlex = flexRoleRandomByCharacter.get(a.id);
+          const bFlex = flexRoleRandomByCharacter.get(b.id);
+          const aFlexRandom = neededRole === "Support" ? (aFlex?.support ?? 0) : (aFlex?.dps ?? 0);
+          const bFlexRandom = neededRole === "Support" ? (bFlex?.support ?? 0) : (bFlex?.dps ?? 0);
+          if (aFlexRandom !== bFlexRandom) {
+            return aFlexRandom - bFlexRandom;
+          }
+        }
+
+        return (candidateBaseOrder.get(a.id) ?? 0) - (candidateBaseOrder.get(b.id) ?? 0);
+      })
+  );
+
+  const supportOrderedCandidates = candidatesForRole("Support");
+  const dpsOrderedCandidates = candidatesForRole("DPS");
 
   const tryAssign = (
     neededRole: "DPS" | "Support",
@@ -441,14 +697,12 @@ function evaluateSlot(
     usedPlayerIdsForAttempt: Set<string>,
     raidAssignmentsForAttempt: Assignment[]
   ) => {
-    for (const character of sortedCandidates) {
+    const roleCandidates = neededRole === "Support" ? supportOrderedCandidates : dpsOrderedCandidates;
+    for (const character of roleCandidates) {
       if (usedCharacterIdsForAttempt.has(character.id)) {
         continue;
       }
       if (usedPlayerIdsForAttempt.has(character.playerId)) {
-        continue;
-      }
-      if (!canTakeRole(character.role, neededRole)) {
         continue;
       }
 
@@ -576,7 +830,7 @@ function evaluateSlot(
   return { scheduledRaid, assignments: evaluateWithSeed() };
 }
 
-export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleResult {
+function generateWeeklyScheduleSingleAttempt(input: GenerateScheduleInput, attemptSeed: number): ScheduleResult {
   const adminPlayerId = input.players[0]?.id;
   const vipPlayerIds = new Set(input.players.filter((p) => p.vip).map((p) => p.id));
   const availabilityByPlayer = new Map<string, { dayOfWeek: number; startMinute: number; endMinute: number }[]>();
@@ -700,6 +954,7 @@ export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleRe
         const evaluation = evaluateSlot(
           raid,
           slot,
+          attemptSeed,
           characters,
           adminPlayerId,
           vipPriorityForRaid,
@@ -770,6 +1025,21 @@ export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleRe
           const bestDay = daySortKeyFromWeekStart(bestForRaid.scheduledRaid.dayOfWeek, 3);
           if (evalDay < bestDay || (evalDay === bestDay && evaluation.scheduledRaid.startMinute < bestForRaid.scheduledRaid.startMinute)) {
             bestForRaid = evaluation;
+            continue;
+          }
+
+          if (evalDay === bestDay && evaluation.scheduledRaid.startMinute === bestForRaid.scheduledRaid.startMinute) {
+            const evalRandom = randomUnitFromKey(
+              attemptSeed,
+              `slot:${raid.id}:${evaluation.scheduledRaid.dayOfWeek}:${evaluation.scheduledRaid.startMinute}`
+            );
+            const bestRandom = randomUnitFromKey(
+              attemptSeed,
+              `slot:${raid.id}:${bestForRaid.scheduledRaid.dayOfWeek}:${bestForRaid.scheduledRaid.startMinute}`
+            );
+            if (evalRandom < bestRandom) {
+              bestForRaid = evaluation;
+            }
           }
         }
       }
@@ -859,6 +1129,16 @@ export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleRe
           if (evalDay < bestDay || (evalDay === bestDay && bestForRaid.scheduledRaid.startMinute < bestEvaluation.scheduledRaid.startMinute)) {
             bestRaidTemplate = raid;
             bestEvaluation = bestForRaid;
+            continue;
+          }
+
+          if (evalDay === bestDay && bestForRaid.scheduledRaid.startMinute === bestEvaluation.scheduledRaid.startMinute) {
+            const raidRandom = randomUnitFromKey(attemptSeed, `raid:${raid.id}`);
+            const bestRaidRandom = randomUnitFromKey(attemptSeed, `raid:${bestRaidTemplate.id}`);
+            if (raidRandom < bestRaidRandom) {
+              bestRaidTemplate = raid;
+              bestEvaluation = bestForRaid;
+            }
           }
         }
       }
@@ -1185,4 +1465,90 @@ export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleRe
     unassignedRaidIds,
     playerDeadtime
   };
+}
+
+export function generateWeeklySchedule(
+  input: GenerateScheduleInput,
+  options: GenerateWeeklyScheduleOptions = {}
+): ScheduleResult {
+  const attempts = clampAttempts(options.attempts);
+  const baseSeed = normalizeSeed(options.seed ?? randomSeed());
+  const earlyStopNoImproveAttempts = clampEarlyStopNoImproveAttempts(options.earlyStopNoImproveAttempts);
+  const requiredRaidIdsByCharacter = buildRequiredRaidIdsByCharacter(input);
+
+  const firstResult = generateWeeklyScheduleSingleAttempt(input, baseSeed);
+  let bestResult = firstResult;
+  let bestQuality = scoreScheduleQualityWithRequiredMap(requiredRaidIdsByCharacter, firstResult);
+  options.onAttemptCompleted?.(1, attempts);
+  let noImproveStreak = 0;
+  let executedAttempts = 1;
+
+  for (let attempt = 1; attempt < attempts; attempt += 1) {
+    const attemptSeed = normalizeSeed(baseSeed + Math.imul(attempt, 0x9e3779b9));
+    const candidateResult = generateWeeklyScheduleSingleAttempt(input, attemptSeed);
+    const candidateQuality = scoreScheduleQualityWithRequiredMap(requiredRaidIdsByCharacter, candidateResult);
+    executedAttempts = attempt + 1;
+
+    if (isScheduleQualityBetter(candidateQuality, bestQuality)) {
+      bestResult = candidateResult;
+      bestQuality = candidateQuality;
+      noImproveStreak = 0;
+    } else {
+      noImproveStreak += 1;
+    }
+
+    options.onAttemptCompleted?.(attempt + 1, attempts);
+
+    if (earlyStopNoImproveAttempts !== undefined && noImproveStreak >= earlyStopNoImproveAttempts) {
+      options.onAttemptCompleted?.(executedAttempts, executedAttempts);
+      break;
+    }
+  }
+
+  return bestResult;
+}
+
+export async function generateWeeklyScheduleAsync(
+  input: GenerateScheduleInput,
+  options: GenerateWeeklyScheduleOptions = {}
+): Promise<ScheduleResult> {
+  const attempts = clampAttempts(options.attempts);
+  const baseSeed = normalizeSeed(options.seed ?? randomSeed());
+  const earlyStopNoImproveAttempts = clampEarlyStopNoImproveAttempts(options.earlyStopNoImproveAttempts);
+  const requiredRaidIdsByCharacter = buildRequiredRaidIdsByCharacter(input);
+
+  const firstResult = generateWeeklyScheduleSingleAttempt(input, baseSeed);
+  let bestResult = firstResult;
+  let bestQuality = scoreScheduleQualityWithRequiredMap(requiredRaidIdsByCharacter, firstResult);
+  options.onAttemptCompleted?.(1, attempts);
+  let noImproveStreak = 0;
+  let executedAttempts = 1;
+
+  for (let attempt = 1; attempt < attempts; attempt += 1) {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 0);
+    });
+
+    const attemptSeed = normalizeSeed(baseSeed + Math.imul(attempt, 0x9e3779b9));
+    const candidateResult = generateWeeklyScheduleSingleAttempt(input, attemptSeed);
+    const candidateQuality = scoreScheduleQualityWithRequiredMap(requiredRaidIdsByCharacter, candidateResult);
+    executedAttempts = attempt + 1;
+
+    if (isScheduleQualityBetter(candidateQuality, bestQuality)) {
+      bestResult = candidateResult;
+      bestQuality = candidateQuality;
+      noImproveStreak = 0;
+    } else {
+      noImproveStreak += 1;
+    }
+
+    options.onAttemptCompleted?.(attempt + 1, attempts);
+
+    if (earlyStopNoImproveAttempts !== undefined && noImproveStreak >= earlyStopNoImproveAttempts) {
+      options.onAttemptCompleted?.(executedAttempts, executedAttempts);
+      break;
+    }
+  }
+
+  return bestResult;
 }
