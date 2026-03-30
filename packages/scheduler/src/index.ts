@@ -26,6 +26,7 @@ type TimeSlot = {
 };
 
 const SLOT_STEP_MINUTES = 20;
+const MAX_RAIDS_PER_CHARACTER = 3;
 
 const RAID_PARTY_SIZE_RULES: Array<{ match: RegExp; capacity: PartySize }> = [
   { match: /kayangel|ivory|voldis/i, capacity: 4 }
@@ -179,7 +180,9 @@ function evaluateSlot(
   slot: TimeSlot,
   characters: Character[],
   availabilityByPlayer: Map<string, { dayOfWeek: number; startMinute: number; endMinute: number }[]>,
-  assignmentsByPlayer: Map<string, PlayerRaidSlot[]>
+  assignmentsByPlayer: Map<string, PlayerRaidSlot[]>,
+  assignedRaidsByCharacter: Map<string, number>,
+  allowedRaidIdsByCharacter: Map<string, Set<string>>
 ): { scheduledRaid: ScheduledRaid; assignments: Assignment[] } {
   const capacity = partySizeForRaid(raid);
   const scheduledRaid: ScheduledRaid = {
@@ -196,6 +199,16 @@ function evaluateSlot(
   let dpsCount = 0;
 
   const candidates = characters.filter((c) => {
+    const allowedRaidIds = allowedRaidIdsByCharacter.get(c.id);
+    if (!allowedRaidIds || !allowedRaidIds.has(raid.id)) {
+      return false;
+    }
+
+    const assignedCount = assignedRaidsByCharacter.get(c.id) ?? 0;
+    if (assignedCount >= MAX_RAIDS_PER_CHARACTER) {
+      return false;
+    }
+
     if (c.itemLevel < raid.itemLevelRequirement) {
       return false;
     }
@@ -286,6 +299,24 @@ export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleRe
   });
 
   const assignmentsByPlayer = new Map<string, PlayerRaidSlot[]>();
+  const assignedRaidsByCharacter = new Map<string, number>();
+  const allowedRaidIdsByCharacter = new Map<string, Set<string>>();
+
+  const raidPriorityOrder = [...raids].sort((a, b) => {
+    if (b.itemLevelRequirement !== a.itemLevelRequirement) {
+      return b.itemLevelRequirement - a.itemLevelRequirement;
+    }
+    return a.id.localeCompare(b.id);
+  });
+
+  for (const character of characters) {
+    const eligibleTopRaids = raidPriorityOrder
+      .filter((raid) => character.itemLevel >= raid.itemLevelRequirement)
+      .slice(0, MAX_RAIDS_PER_CHARACTER)
+      .map((raid) => raid.id);
+    allowedRaidIdsByCharacter.set(character.id, new Set(eligibleTopRaids));
+  }
+
   const raidSchedules: RaidSchedule[] = [];
 
   for (const raid of raids) {
@@ -293,7 +324,15 @@ export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleRe
     let best: { scheduledRaid: ScheduledRaid; assignments: Assignment[] } | null = null;
 
     for (const slot of candidateSlots) {
-      const evaluation = evaluateSlot(raid, slot, characters, availabilityByPlayer, assignmentsByPlayer);
+      const evaluation = evaluateSlot(
+        raid,
+        slot,
+        characters,
+        availabilityByPlayer,
+        assignmentsByPlayer,
+        assignedRaidsByCharacter,
+        allowedRaidIdsByCharacter
+      );
       if (!best || evaluation.assignments.length > best.assignments.length) {
         best = evaluation;
         continue;
@@ -321,6 +360,9 @@ export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleRe
     const raidAssignments = best?.assignments ?? [];
 
     for (const assignment of raidAssignments) {
+      const currentCharacterCount = assignedRaidsByCharacter.get(assignment.characterId) ?? 0;
+      assignedRaidsByCharacter.set(assignment.characterId, currentCharacterCount + 1);
+
       const slotList = assignmentsByPlayer.get(assignment.playerId) ?? [];
       slotList.push({
         raidId: scheduledRaid.id,

@@ -17,6 +17,7 @@
         <button class="tab is-active" data-tab-target="players">Players & Characters</button>
         <button class="tab" data-tab-target="raids">Raids</button>
         <button class="tab" data-tab-target="availability">Availability</button>
+        <button class="tab" data-tab-target="schedule">Schedule</button>
       </nav>
 
       <section class="tab-panel is-active" data-tab="players">
@@ -183,6 +184,19 @@
             </thead>
             <tbody id="availability-table"></tbody>
           </table>
+        </section>
+      </section>
+
+      <section class="tab-panel" data-tab="schedule">
+        <section class="panel">
+          <h2>Generate Weekly Schedule</h2>
+          <p>Build the latest schedule from current data and display it in a spreadsheet-style grid.</p>
+          <button id="generate-schedule">Generate Schedule Grid</button>
+        </section>
+
+        <section class="panel">
+          <h2>Schedule Grid</h2>
+          <div id="schedule-grid" class="grid-wrap empty">Click "Generate Schedule Grid" to render.</div>
         </section>
       </section>
 

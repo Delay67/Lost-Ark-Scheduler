@@ -3,6 +3,8 @@ const playersTable = document.getElementById("players-table");
 const charactersTable = document.getElementById("characters-table");
 const raidsTable = document.getElementById("raids-table");
 const availabilityTable = document.getElementById("availability-table");
+const scheduleGrid = document.getElementById("schedule-grid");
+const generateScheduleButton = document.getElementById("generate-schedule");
 const characterPlayerSelect = document.getElementById("character-player");
 const availabilityPlayerSelect = document.getElementById("availability-player");
 
@@ -159,6 +161,86 @@ function renderAvailability(windows, playersById) {
     `;
     availabilityTable.append(row);
   }
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function renderScheduleGrid(grid) {
+  if (!grid?.days?.length) {
+    scheduleGrid.classList.add("empty");
+    scheduleGrid.textContent = "No schedule rows were generated with current data.";
+    return;
+  }
+
+  const coreCols = grid.columns?.corePlayers ?? [];
+  const supportCount = Number(grid.columns?.supports ?? 2);
+
+  const table = document.createElement("table");
+  table.className = "schedule-table";
+
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  const headers = [
+    "Notes",
+    "Time",
+    "Day",
+    "Raid",
+    ...coreCols,
+    "Extras",
+    ...Array.from({ length: supportCount }, (_, index) => `Support ${index + 1}`),
+    "Count"
+  ];
+
+  for (const header of headers) {
+    const th = document.createElement("th");
+    th.textContent = header;
+    headRow.append(th);
+  }
+
+  thead.append(headRow);
+  table.append(thead);
+
+  const tbody = document.createElement("tbody");
+
+  for (const dayBlock of grid.days) {
+    const dayRows = dayBlock.rows ?? [];
+    for (const row of dayRows) {
+      const tr = document.createElement("tr");
+
+      const supportCells = Array.from({ length: supportCount }, (_, i) => row.supports?.[i] ?? "");
+      const cellValues = [
+        row.notes ?? "",
+        row.time ?? "",
+        row.day ?? dayBlock.day ?? "",
+        row.raid ?? "",
+        ...coreCols.map((playerName) => row.corePlayers?.[playerName] ?? ""),
+        (row.extras ?? []).join(", "),
+        ...supportCells,
+        String(row.count ?? 0)
+      ];
+
+      for (const value of cellValues) {
+        const td = document.createElement("td");
+        td.innerHTML = escapeHtml(value);
+        tr.append(td);
+      }
+
+      tbody.append(tr);
+    }
+  }
+
+  table.append(tbody);
+
+  scheduleGrid.classList.remove("empty");
+  scheduleGrid.innerHTML = "";
+  scheduleGrid.append(table);
 }
 
 async function refresh() {
@@ -470,6 +552,26 @@ availabilityTable.addEventListener("click", async (event) => {
     }
   } catch (error) {
     setStatus(error.message, true);
+  }
+});
+
+generateScheduleButton.addEventListener("click", async () => {
+  generateScheduleButton.disabled = true;
+  generateScheduleButton.textContent = "Generating...";
+
+  try {
+    const grid = await api("/schedules/grid", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+
+    renderScheduleGrid(grid);
+    setStatus("Schedule grid generated.");
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    generateScheduleButton.disabled = false;
+    generateScheduleButton.textContent = "Generate Schedule Grid";
   }
 });
 

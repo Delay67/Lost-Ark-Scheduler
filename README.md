@@ -27,6 +27,8 @@ This repository now contains the first implementation slice of a weekly raid sch
 	- Primary: fill raids as much as possible with valid assignments.
 	- Secondary: reduce downtime by preferring contiguous assignments for each player.
 - Week processing order defaults to Wednesday as the first day.
+- Each character can be assigned to at most 3 raids per week.
+- Character assignment prioritizes higher item-level-requirement raids first.
 
 ## Project structure
 
