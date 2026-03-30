@@ -7,9 +7,9 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm --workspace @las/shared run build && npm --workspace @las/scheduler run build && npm --workspace @las/api run build",
-    "dev": "npm --workspace @las/shared run build && npm --workspace @las/scheduler run build && npm --workspace @las/api run dev",
-    "typecheck": "npm --workspace @las/shared run typecheck && npm --workspace @las/scheduler run typecheck && npm --workspace @las/api run typecheck"
+    "build": "npm --workspace @las/shared run build && npm --workspace @las/scheduler-baseline run build && npm --workspace @las/solver-service run build && npm --workspace @las/scheduler run build && npm --workspace @las/api run build",
+    "dev": "npm --workspace @las/shared run build && npm --workspace @las/scheduler-baseline run build && npm --workspace @las/solver-service run build && npm --workspace @las/scheduler run build && npm --workspace @las/api run dev",
+    "typecheck": "npm --workspace @las/shared run build && npm --workspace @las/scheduler-baseline run build && npm --workspace @las/solver-service run build && npm --workspace @las/scheduler run build && npm --workspace @las/api run typecheck"
   },
   "engines": {
     "node": ">=20"

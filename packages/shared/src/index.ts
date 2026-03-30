@@ -136,3 +136,53 @@ export function roleCaps(capacity: PartySize): { maxDps: number; maxSupport: num
     ? { maxDps: 6, maxSupport: 2 }
     : { maxDps: 3, maxSupport: 1 };
 }
+
+export type {
+  SchedulerInput,
+  SchedulerOutput,
+  ISchedulerEngine,
+  SchedulerOptions,
+  ScheduleQuality
+} from "./scheduler-domain.js";
+
+export {
+  toSchedulerInput,
+  toSchedulerOutput
+} from "./scheduler-domain.js";
+
+export type {
+  EligibilityResult,
+  EligibilityContext
+} from "./scheduler-rules.js";
+
+export {
+  checkItemLevelRequirement,
+  checkRoleValidity,
+  checkPerCharacterRaidCap,
+  checkNoPlayerOverlap,
+  checkNoDuplicateRaidNames,
+  checkRaidNotOptedOut,
+  checkNoTimeConflict,
+  checkAvailabilityCoverage,
+  checkRaidNotAtCapacity,
+  checkRoleSlotAvailable,
+  checkAllHardConstraints,
+  checkCharacterEligibility
+} from "./scheduler-rules.js";
+
+export type {
+  SoftObjectiveWeights,
+  HardConstraintsConfig,
+  SchedulerConfig
+} from "./scheduler-config.js";
+
+export {
+  SoftObjectiveWeightsSchema,
+  HardConstraintsConfigSchema,
+  SchedulerConfigSchema,
+  DEFAULT_SCHEDULER_CONFIG,
+  SCHEDULER_PRESETS,
+  mergeConfig,
+  loadPreset,
+  validateConfig
+} from "./scheduler-config.js";

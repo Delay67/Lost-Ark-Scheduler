@@ -10,7 +10,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@las/shared": "0.1.0"
+    "@las/shared": "*",
+    "@las/scheduler-baseline": "*",
+    "@las/solver-service": "*"
   },
   "devDependencies": {
     "typescript": "^5.8.2"

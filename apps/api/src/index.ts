@@ -16,6 +16,8 @@ import {
 } from "@las/shared";
 import {
   generateWeeklySchedule,
+  generateWeeklyScheduleWithEngine,
+  compareSchedulerEngines,
   isScheduleQualityBetter,
   scoreScheduleQuality,
   type ScheduleQuality
@@ -38,7 +40,10 @@ const ScheduleGenerationOptionsSchema = z.object({
   data: GenerateScheduleInputSchema.optional(),
   attempts: z.number().int().min(1).max(5000).optional(),
   seed: z.number().int().min(0).max(4294967295).optional(),
-  earlyStopNoImproveAttempts: z.number().int().min(1).max(5000).optional()
+  earlyStopNoImproveAttempts: z.number().int().min(1).max(5000).optional(),
+  engine: z.enum(["heuristic", "solver", "hybrid"]).optional(),
+  fallbackToHeuristic: z.boolean().optional(),
+  compareWithHeuristic: z.boolean().optional()
 });
 
 type ScheduleProgressJob = {
@@ -47,6 +52,7 @@ type ScheduleProgressJob = {
   attempts: number;
   completedAttempts: number;
   seed: number;
+  engine: "heuristic" | "solver" | "hybrid";
   result?: ReturnType<typeof generateWeeklySchedule>;
   grid?: ReturnType<typeof toWeeklyGrid>;
   data?: DataStore;
@@ -456,17 +462,24 @@ app.post("/schedules/generate", async (req, res) => {
   const fromRequest = GenerateScheduleInputSchema.safeParse(req.body);
 
   if (fromRequest.success) {
-    return res.json(generateWeeklySchedule(fromRequest.data));
+    const result = await generateWeeklyScheduleWithEngine(fromRequest.data, {
+      engine: "hybrid"
+    });
+    return res.json(result);
   }
 
   const withOptions = ScheduleGenerationOptionsSchema.safeParse(req.body ?? {});
   if (withOptions.success) {
     const data = withOptions.data.data ?? (await store.load());
-    return res.json(generateWeeklySchedule(data, {
+    const result = await generateWeeklyScheduleWithEngine(data, {
       attempts: withOptions.data.attempts,
       seed: withOptions.data.seed,
-      earlyStopNoImproveAttempts: withOptions.data.earlyStopNoImproveAttempts
-    }));
+      earlyStopNoImproveAttempts: withOptions.data.earlyStopNoImproveAttempts,
+      engine: withOptions.data.engine,
+      fallbackToHeuristic: withOptions.data.fallbackToHeuristic,
+      compareWithHeuristic: withOptions.data.compareWithHeuristic
+    });
+    return res.json(result);
   }
 
   if (req.body && Object.keys(req.body).length > 0) {
@@ -476,7 +489,11 @@ app.post("/schedules/generate", async (req, res) => {
   }
 
   const data = await store.load();
-  return res.json(generateWeeklySchedule(data, { attempts: 1000 }));
+  const result = await generateWeeklyScheduleWithEngine(data, {
+    attempts: 1000,
+    engine: "hybrid"
+  });
+  return res.json(result);
 });
 
 app.post("/schedules/generate-progress/start", async (req, res) => {
@@ -490,6 +507,7 @@ app.post("/schedules/generate-progress/start", async (req, res) => {
   const attempts = payload.attempts ?? 1000;
   const seed = payload.seed ?? (Math.floor(Math.random() * 0x100000000) >>> 0);
   const earlyStopNoImproveAttempts = payload.earlyStopNoImproveAttempts;
+  const engine = payload.engine ?? "hybrid";
 
   const jobId = randomUUID();
   const job: ScheduleProgressJob = {
@@ -497,26 +515,40 @@ app.post("/schedules/generate-progress/start", async (req, res) => {
     state: "running",
     attempts,
     completedAttempts: 0,
-    seed
+    seed,
+    engine
   };
   scheduleProgressJobs.set(jobId, job);
 
   void (async () => {
     try {
-      const result = await generateWeeklyScheduleParallel(
-        data,
-        attempts,
-        seed,
-        earlyStopNoImproveAttempts,
-        (completedAttempts, totalAttempts) => {
-        const current = scheduleProgressJobs.get(jobId);
-        if (!current) {
-          return;
-        }
-        current.completedAttempts = completedAttempts;
-        current.attempts = totalAttempts;
-        }
-      );
+      let result: ScheduleResult;
+
+      if (engine === "heuristic") {
+        result = await generateWeeklyScheduleParallel(
+          data,
+          attempts,
+          seed,
+          earlyStopNoImproveAttempts,
+          (completedAttempts, totalAttempts) => {
+            const current = scheduleProgressJobs.get(jobId);
+            if (!current) {
+              return;
+            }
+            current.completedAttempts = completedAttempts;
+            current.attempts = totalAttempts;
+          }
+        );
+      } else {
+        result = await generateWeeklyScheduleWithEngine(data, {
+          attempts,
+          seed,
+          earlyStopNoImproveAttempts,
+          engine,
+          fallbackToHeuristic: payload.fallbackToHeuristic,
+          compareWithHeuristic: payload.compareWithHeuristic
+        });
+      }
 
       const current = scheduleProgressJobs.get(jobId);
       if (!current) {
@@ -541,7 +573,8 @@ app.post("/schedules/generate-progress/start", async (req, res) => {
   return res.json({
     jobId,
     attempts,
-    seed
+    seed,
+    engine
   });
 });
 
@@ -557,11 +590,32 @@ app.get("/schedules/generate-progress/:jobId", (req, res) => {
     attempts: job.attempts,
     completedAttempts: job.completedAttempts,
     seed: job.seed,
+    engine: job.engine,
     error: job.error,
     result: job.state === "completed" ? job.result : undefined,
     grid: job.state === "completed" ? job.grid : undefined,
     data: job.state === "completed" ? job.data : undefined
   });
+});
+
+app.post("/schedules/compare", async (req, res) => {
+  const parsed = ScheduleGenerationOptionsSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const payload = parsed.data;
+  const data = payload.data ?? (await store.load());
+  const comparison = await compareSchedulerEngines(data, {
+    attempts: payload.attempts,
+    seed: payload.seed,
+    earlyStopNoImproveAttempts: payload.earlyStopNoImproveAttempts,
+    fallbackToHeuristic: payload.fallbackToHeuristic,
+    compareWithHeuristic: payload.compareWithHeuristic,
+    engine: "hybrid"
+  });
+
+  return res.json(comparison);
 });
 
 const GenerateGridSchema = z.object({
@@ -581,10 +635,11 @@ app.post("/schedules/grid", async (req, res) => {
 
   const payload = parsed.data;
   const data = payload.data ?? (await store.load());
-  const generated = generateWeeklySchedule(data, {
+  const generated = await generateWeeklyScheduleWithEngine(data, {
     attempts: payload.attempts,
     seed: payload.seed,
-    earlyStopNoImproveAttempts: payload.earlyStopNoImproveAttempts
+    earlyStopNoImproveAttempts: payload.earlyStopNoImproveAttempts,
+    engine: "hybrid"
   });
 
   return res.json(
