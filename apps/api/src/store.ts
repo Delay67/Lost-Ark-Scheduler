@@ -35,7 +35,7 @@ export class Store {
     return player;
   }
 
-  async updatePlayer(id: string, patch: { name?: string }): Promise<Player | null> {
+  async updatePlayer(id: string, patch: { name?: string; vip?: boolean }): Promise<Player | null> {
     const data = await this.load();
     const index = data.players.findIndex((p) => p.id === id);
     if (index < 0) {

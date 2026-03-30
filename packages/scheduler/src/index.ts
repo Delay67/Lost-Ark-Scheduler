@@ -310,9 +310,13 @@ function evaluateSlot(
   slot: TimeSlot,
   characters: Character[],
   adminPlayerId: string | undefined,
+  vipPriorityCharacterIds: Set<string>,
+  requiredCharacterIdsByPlayerRaid: Map<string, Set<string>>,
+  characterIdsByPlayer: Map<string, string[]>,
   availabilityByPlayer: Map<string, { dayOfWeek: number; startMinute: number; endMinute: number }[]>,
   assignmentsByPlayer: Map<string, PlayerRaidSlot[]>,
   assignedRaidsByCharacter: Map<string, number>,
+  assignedRaidIdsByCharacter: Map<string, Set<string>>,
   allowedRaidIdsByCharacter: Map<string, Set<string>>,
   assignedRaidNamesByCharacter: Map<string, Set<string>>
 ): { scheduledRaid: ScheduledRaid; assignments: Assignment[] } {
@@ -360,6 +364,36 @@ function evaluateSlot(
   });
 
   const sortedCandidates = [...candidates].sort((a, b) => {
+    const aVipPriority = vipPriorityCharacterIds.has(a.id) ? 1 : 0;
+    const bVipPriority = vipPriorityCharacterIds.has(b.id) ? 1 : 0;
+    if (aVipPriority !== bVipPriority) {
+      return bVipPriority - aVipPriority;
+    }
+
+    const deficitForPlayer = (playerId: string): number => {
+      const requiredCharIds = requiredCharacterIdsByPlayerRaid.get(`${playerId}|${raid.id}`) ?? new Set<string>();
+      if (requiredCharIds.size === 0) {
+        return 0;
+      }
+
+      let assignedForRaid = 0;
+      const playerCharIds = characterIdsByPlayer.get(playerId) ?? [];
+      for (const charId of playerCharIds) {
+        const assignedRaidIds = assignedRaidIdsByCharacter.get(charId);
+        if (assignedRaidIds?.has(raid.id)) {
+          assignedForRaid += 1;
+        }
+      }
+
+      return requiredCharIds.size - assignedForRaid;
+    };
+
+    const aDeficit = deficitForPlayer(a.playerId);
+    const bDeficit = deficitForPlayer(b.playerId);
+    if (aDeficit !== bDeficit) {
+      return bDeficit - aDeficit;
+    }
+
     const aSlots = assignmentsByPlayer.get(a.playerId) ?? [];
     const bSlots = assignmentsByPlayer.get(b.playerId) ?? [];
 
@@ -502,6 +536,10 @@ function evaluateSlot(
     return seededAssignments;
   };
 
+  const vipProgressCount = (assignments: Assignment[]): number => (
+    assignments.filter((a) => vipPriorityCharacterIds.has(a.characterId)).length
+  );
+
   if (adminPlayerId) {
     const adminCandidates = sortedCandidates.filter((c) => c.playerId === adminPlayerId);
     if (adminCandidates.length === 0) {
@@ -523,6 +561,11 @@ function evaluateSlot(
         const seeded = evaluateWithSeed(adminCandidate, seedRole);
         if (seeded.length > bestSeededAssignments.length) {
           bestSeededAssignments = seeded;
+          continue;
+        }
+
+        if (seeded.length === bestSeededAssignments.length && vipProgressCount(seeded) > vipProgressCount(bestSeededAssignments)) {
+          bestSeededAssignments = seeded;
         }
       }
     }
@@ -535,6 +578,7 @@ function evaluateSlot(
 
 export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleResult {
   const adminPlayerId = input.players[0]?.id;
+  const vipPlayerIds = new Set(input.players.filter((p) => p.vip).map((p) => p.id));
   const availabilityByPlayer = new Map<string, { dayOfWeek: number; startMinute: number; endMinute: number }[]>();
   for (const window of input.availabilityWindows) {
     const list = availabilityByPlayer.get(window.playerId) ?? [];
@@ -556,7 +600,11 @@ export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleRe
   const assignmentsByPlayer = new Map<string, PlayerRaidSlot[]>();
   const assignedRaidsByCharacter = new Map<string, number>();
   const assignedRaidNamesByCharacter = new Map<string, Set<string>>();
+  const assignedRaidIdsByCharacter = new Map<string, Set<string>>();
   const allowedRaidIdsByCharacter = new Map<string, Set<string>>();
+  const requiredRaidIdsByVipCharacter = new Map<string, Set<string>>();
+  const requiredCharacterIdsByPlayerRaid = new Map<string, Set<string>>();
+  const characterIdsByPlayer = new Map<string, string[]>();
 
   const raidPriorityOrder = [...raids].sort((a, b) => {
     if (b.itemLevelRequirement !== a.itemLevelRequirement) {
@@ -566,6 +614,10 @@ export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleRe
   });
 
   for (const character of characters) {
+    const playerCharIds = characterIdsByPlayer.get(character.playerId) ?? [];
+    playerCharIds.push(character.id);
+    characterIdsByPlayer.set(character.playerId, playerCharIds);
+
     const eligibleUniqueRaids: RaidInstance[] = [];
     const seenRaidNames = new Set<string>();
 
@@ -592,6 +644,17 @@ export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleRe
       .filter((raid) => !optedOutRaidIds.has(raid.id))
       .map((raid) => raid.id);
     allowedRaidIdsByCharacter.set(character.id, new Set(eligibleTopRaids));
+
+    for (const raidId of eligibleTopRaids) {
+      const key = `${character.playerId}|${raidId}`;
+      const setForKey = requiredCharacterIdsByPlayerRaid.get(key) ?? new Set<string>();
+      setForKey.add(character.id);
+      requiredCharacterIdsByPlayerRaid.set(key, setForKey);
+    }
+
+    if (vipPlayerIds.has(character.playerId)) {
+      requiredRaidIdsByVipCharacter.set(character.id, new Set(eligibleTopRaids));
+    }
   }
 
   const raidSchedules: RaidSchedule[] = [];
@@ -601,6 +664,18 @@ export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleRe
   }
 
   while (true) {
+    const vipPriorityCharacterIds = new Set<string>();
+    for (const [characterId, requiredRaidIds] of requiredRaidIdsByVipCharacter.entries()) {
+      const assignedIds = assignedRaidIdsByCharacter.get(characterId) ?? new Set<string>();
+      for (const raidId of requiredRaidIds) {
+        if (!assignedIds.has(raidId)) {
+          vipPriorityCharacterIds.add(characterId);
+          break;
+        }
+      }
+    }
+    const hasUnmetVipRequirements = vipPriorityCharacterIds.size > 0;
+
     let bestRaidTemplate: RaidInstance | null = null;
     let bestEvaluation: { scheduledRaid: ScheduledRaid; assignments: Assignment[] } | null = null;
 
@@ -613,17 +688,44 @@ export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleRe
       let bestForRaid: { scheduledRaid: ScheduledRaid; assignments: Assignment[] } | null = null;
 
       for (const slot of candidateSlots) {
+        const vipPriorityForRaid = new Set<string>();
+        for (const characterId of vipPriorityCharacterIds) {
+          const allowed = allowedRaidIdsByCharacter.get(characterId);
+          const assignedIds = assignedRaidIdsByCharacter.get(characterId) ?? new Set<string>();
+          if (allowed?.has(raid.id) && !assignedIds.has(raid.id)) {
+            vipPriorityForRaid.add(characterId);
+          }
+        }
+
         const evaluation = evaluateSlot(
           raid,
           slot,
           characters,
           adminPlayerId,
+          vipPriorityForRaid,
+          requiredCharacterIdsByPlayerRaid,
+          characterIdsByPlayer,
           availabilityByPlayer,
           assignmentsByPlayer,
           assignedRaidsByCharacter,
+          assignedRaidIdsByCharacter,
           allowedRaidIdsByCharacter,
           assignedRaidNamesByCharacter
         );
+
+        const evaluationVipProgress = evaluation.assignments.filter((a) => vipPriorityForRaid.has(a.characterId)).length;
+        const bestVipProgress = bestForRaid
+          ? bestForRaid.assignments.filter((a) => vipPriorityForRaid.has(a.characterId)).length
+          : -1;
+
+        if (hasUnmetVipRequirements && evaluationVipProgress > bestVipProgress) {
+          bestForRaid = evaluation;
+          continue;
+        }
+
+        if (hasUnmetVipRequirements && evaluationVipProgress < bestVipProgress) {
+          continue;
+        }
 
         if (!bestForRaid || evaluation.assignments.length > bestForRaid.assignments.length) {
           bestForRaid = evaluation;
@@ -676,9 +778,29 @@ export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleRe
         continue;
       }
 
+      if (hasUnmetVipRequirements) {
+        const progressesVip = bestForRaid.assignments.some((assignment) => vipPriorityCharacterIds.has(assignment.characterId));
+        if (!progressesVip) {
+          continue;
+        }
+      }
+
       if (!bestEvaluation || !bestRaidTemplate) {
         bestRaidTemplate = raid;
         bestEvaluation = bestForRaid;
+        continue;
+      }
+
+      const bestForRaidVipProgress = bestForRaid.assignments.filter((a) => vipPriorityCharacterIds.has(a.characterId)).length;
+      const bestEvalVipProgress = bestEvaluation.assignments.filter((a) => vipPriorityCharacterIds.has(a.characterId)).length;
+
+      if (hasUnmetVipRequirements && bestForRaidVipProgress > bestEvalVipProgress) {
+        bestRaidTemplate = raid;
+        bestEvaluation = bestForRaid;
+        continue;
+      }
+
+      if (hasUnmetVipRequirements && bestForRaidVipProgress < bestEvalVipProgress) {
         continue;
       }
 
@@ -757,6 +879,10 @@ export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleRe
       assignedRaidNames.add(normalizeRaidName(scheduledRaid.name));
       assignedRaidNamesByCharacter.set(assignment.characterId, assignedRaidNames);
 
+      const assignedRaidIds = assignedRaidIdsByCharacter.get(assignment.characterId) ?? new Set<string>();
+      assignedRaidIds.add(scheduledRaid.id);
+      assignedRaidIdsByCharacter.set(assignment.characterId, assignedRaidIds);
+
       const slotList = assignmentsByPlayer.get(assignment.playerId) ?? [];
       slotList.push({
         raidId: scheduledRaid.id,
@@ -782,6 +908,251 @@ export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleRe
     });
   }
 
+  const characterById = new Map(characters.map((c) => [c.id, c]));
+
+  const getRoleCounts = (raidSchedule: RaidSchedule) => {
+    let support = 0;
+    let dps = 0;
+    for (const a of raidSchedule.assignments) {
+      if (a.assignedRole === "Support") {
+        support += 1;
+      } else {
+        dps += 1;
+      }
+    }
+    return { support, dps };
+  };
+
+  const playerAlreadyInRaid = (raidSchedule: RaidSchedule, playerId: string): boolean => (
+    raidSchedule.assignments.some((a) => a.playerId === playerId)
+  );
+
+  const removeAssignment = (raidSchedule: RaidSchedule, assignment: Assignment): boolean => {
+    const idx = raidSchedule.assignments.findIndex((a) => (
+      a.characterId === assignment.characterId
+      && a.playerId === assignment.playerId
+      && a.raidId === assignment.raidId
+      && a.assignedRole === assignment.assignedRole
+    ));
+    if (idx < 0) {
+      return false;
+    }
+
+    raidSchedule.assignments.splice(idx, 1);
+
+    const currentCharacterCount = assignedRaidsByCharacter.get(assignment.characterId) ?? 0;
+    assignedRaidsByCharacter.set(assignment.characterId, Math.max(0, currentCharacterCount - 1));
+
+    assignedRaidNamesByCharacter.get(assignment.characterId)?.delete(normalizeRaidName(raidSchedule.raid.name));
+    assignedRaidIdsByCharacter.get(assignment.characterId)?.delete(raidSchedule.raid.id);
+
+    const playerSlots = assignmentsByPlayer.get(assignment.playerId) ?? [];
+    const slotIdx = playerSlots.findIndex((s) => (
+      s.raidId === raidSchedule.raid.id
+      && s.dayOfWeek === raidSchedule.raid.dayOfWeek
+      && s.startMinute === raidSchedule.raid.startMinute
+      && s.endMinute === raidSchedule.raid.startMinute + raidSchedule.raid.durationMinutes
+    ));
+    if (slotIdx >= 0) {
+      playerSlots.splice(slotIdx, 1);
+      assignmentsByPlayer.set(assignment.playerId, playerSlots);
+    }
+
+    return true;
+  };
+
+  const addAssignment = (raidSchedule: RaidSchedule, character: Character, role: "DPS" | "Support"): boolean => {
+    const allowed = allowedRaidIdsByCharacter.get(character.id);
+    if (!allowed?.has(raidSchedule.raid.id)) {
+      return false;
+    }
+    if (character.itemLevel < raidSchedule.raid.itemLevelRequirement) {
+      return false;
+    }
+    if (playerAlreadyInRaid(raidSchedule, character.playerId)) {
+      return false;
+    }
+    const assignedCount = assignedRaidsByCharacter.get(character.id) ?? 0;
+    if (assignedCount >= MAX_RAIDS_PER_CHARACTER) {
+      return false;
+    }
+    const assignedNames = assignedRaidNamesByCharacter.get(character.id) ?? new Set<string>();
+    if (assignedNames.has(normalizeRaidName(raidSchedule.raid.name))) {
+      return false;
+    }
+
+    const windows = availabilityByPlayer.get(character.playerId) ?? [];
+    if (!containsSlot(windows, { dayOfWeek: raidSchedule.raid.dayOfWeek, startMinute: raidSchedule.raid.startMinute }, raidSchedule.raid.durationMinutes)) {
+      return false;
+    }
+
+    const existingSlots = assignmentsByPlayer.get(character.playerId) ?? [];
+    if (hasRaidConflict(existingSlots, raidSchedule.raid)) {
+      return false;
+    }
+
+    if (!canTakeRole(character.role, role)) {
+      return false;
+    }
+
+    const counts = getRoleCounts(raidSchedule);
+    const caps = roleCaps(raidSchedule.raid.capacity);
+    if (role === "Support" && counts.support >= caps.maxSupport) {
+      return false;
+    }
+    if (role === "DPS" && counts.dps >= caps.maxDps) {
+      return false;
+    }
+    if (raidSchedule.assignments.length >= raidSchedule.raid.capacity) {
+      return false;
+    }
+
+    const assignment: Assignment = {
+      raidId: raidSchedule.raid.id,
+      characterId: character.id,
+      playerId: character.playerId,
+      assignedRole: role
+    };
+    raidSchedule.assignments.push(assignment);
+
+    assignedRaidsByCharacter.set(character.id, assignedCount + 1);
+    const nextAssignedNames = assignedRaidNamesByCharacter.get(character.id) ?? new Set<string>();
+    nextAssignedNames.add(normalizeRaidName(raidSchedule.raid.name));
+    assignedRaidNamesByCharacter.set(character.id, nextAssignedNames);
+
+    const nextAssignedIds = assignedRaidIdsByCharacter.get(character.id) ?? new Set<string>();
+    nextAssignedIds.add(raidSchedule.raid.id);
+    assignedRaidIdsByCharacter.set(character.id, nextAssignedIds);
+
+    const slotList = assignmentsByPlayer.get(character.playerId) ?? [];
+    slotList.push({
+      raidId: raidSchedule.raid.id,
+      dayOfWeek: raidSchedule.raid.dayOfWeek,
+      startMinute: raidSchedule.raid.startMinute,
+      endMinute: raidSchedule.raid.startMinute + raidSchedule.raid.durationMinutes
+    });
+    assignmentsByPlayer.set(character.playerId, slotList);
+
+    return true;
+  };
+
+  const getAssignmentsForCharacter = (characterId: string): Array<{ raidSchedule: RaidSchedule; assignment: Assignment }> => {
+    const results: Array<{ raidSchedule: RaidSchedule; assignment: Assignment }> = [];
+    for (const raidSchedule of raidSchedules) {
+      for (const assignment of raidSchedule.assignments) {
+        if (assignment.characterId === characterId) {
+          results.push({ raidSchedule, assignment });
+        }
+      }
+    }
+    return results;
+  };
+
+  for (const targetRaidSchedule of raidSchedules) {
+    const caps = roleCaps(targetRaidSchedule.raid.capacity);
+
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const counts = getRoleCounts(targetRaidSchedule);
+      const needsSupport = counts.support < caps.maxSupport;
+      const needsDps = counts.dps < caps.maxDps;
+      if (!needsSupport && !needsDps) {
+        break;
+      }
+
+      const preferredRoles: Array<"Support" | "DPS"> = [];
+      if (needsSupport) {
+        preferredRoles.push("Support");
+      }
+      if (needsDps) {
+        preferredRoles.push("DPS");
+      }
+
+      for (const role of preferredRoles) {
+        // Direct add first.
+        for (const character of characters) {
+          if (addAssignment(targetRaidSchedule, character, role)) {
+            changed = true;
+            break;
+          }
+        }
+        if (changed) {
+          break;
+        }
+
+        // Try one-for-one swap: move capped character into target and replace in source.
+        for (const character of characters) {
+          const assignedCount = assignedRaidsByCharacter.get(character.id) ?? 0;
+          if (assignedCount < MAX_RAIDS_PER_CHARACTER) {
+            continue;
+          }
+
+          const snapshots = getAssignmentsForCharacter(character.id);
+          for (const snapshot of snapshots) {
+            const sourceRaidSchedule = snapshot.raidSchedule;
+            const sourceAssignment = snapshot.assignment;
+
+            if (sourceRaidSchedule === targetRaidSchedule) {
+              continue;
+            }
+
+            if (!removeAssignment(sourceRaidSchedule, sourceAssignment)) {
+              continue;
+            }
+
+            const moved = addAssignment(targetRaidSchedule, character, role);
+            if (!moved) {
+              addAssignment(sourceRaidSchedule, character, sourceAssignment.assignedRole);
+              continue;
+            }
+
+            let replaced = false;
+            for (const replacement of characters) {
+              if (replacement.id === character.id) {
+                continue;
+              }
+              if (addAssignment(sourceRaidSchedule, replacement, sourceAssignment.assignedRole)) {
+                replaced = true;
+                break;
+              }
+            }
+
+            if (replaced) {
+              changed = true;
+              break;
+            }
+
+            // Roll back if we cannot keep source fill.
+            const rollbackTargetAssignment = targetRaidSchedule.assignments.find((a) => a.characterId === character.id && a.raidId === targetRaidSchedule.raid.id);
+            if (rollbackTargetAssignment) {
+              removeAssignment(targetRaidSchedule, rollbackTargetAssignment);
+            }
+            addAssignment(sourceRaidSchedule, character, sourceAssignment.assignedRole);
+          }
+
+          if (changed) {
+            break;
+          }
+        }
+
+        if (changed) {
+          break;
+        }
+      }
+    }
+  }
+
+  for (const raidSchedule of raidSchedules) {
+    raidSchedule.isFull = raidSchedule.assignments.length === raidSchedule.raid.capacity;
+    raidSchedule.warnings = [];
+    if (!raidSchedule.isFull) {
+      raidSchedule.warnings.push(
+        `Raid underfilled: assigned ${raidSchedule.assignments.length}/${raidSchedule.raid.capacity}. Up to 2 slots remain reserved for supports.`
+      );
+    }
+  }
+
   raidSchedules.sort((a, b) => {
     const daySort = daySortKeyFromWeekStart(a.raid.dayOfWeek, 3) - daySortKeyFromWeekStart(b.raid.dayOfWeek, 3);
     if (daySort !== 0) {
@@ -795,6 +1166,19 @@ export function generateWeeklySchedule(input: GenerateScheduleInput): ScheduleRe
 
   const unassignedRaidIds = [...new Set(raidSchedules.filter((r) => !r.isFull).map((r) => r.raid.id))];
   const playerDeadtime = summarizeDeadtime(assignmentsByPlayer);
+
+  for (const [characterId, requiredRaidIds] of requiredRaidIdsByVipCharacter.entries()) {
+    const assignedIds = assignedRaidIdsByCharacter.get(characterId) ?? new Set<string>();
+    for (const raidId of requiredRaidIds) {
+      if (!assignedIds.has(raidId)) {
+        return {
+          raidSchedules: [],
+          unassignedRaidIds: [],
+          playerDeadtime: []
+        };
+      }
+    }
+  }
 
   return {
     raidSchedules,

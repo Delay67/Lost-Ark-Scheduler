@@ -4,6 +4,7 @@ const charactersTable = document.getElementById("characters-table");
 const raidsTable = document.getElementById("raids-table");
 const availabilityTable = document.getElementById("availability-table");
 const scheduleGrid = document.getElementById("schedule-grid");
+const scheduleSummary = document.getElementById("schedule-summary");
 const generateScheduleButton = document.getElementById("generate-schedule");
 const characterPlayerSelect = document.getElementById("character-player");
 const availabilityPlayerSelect = document.getElementById("availability-player");
@@ -97,6 +98,7 @@ function renderPlayers(players) {
     const row = document.createElement("tr");
     row.innerHTML = `
       <td>${normalizeDisplayText(player.name)}</td>
+      <td><input type="checkbox" data-action="toggle-player-vip" data-id="${player.id}" ${player.vip ? "checked" : ""} /></td>
       <td>${player.id}</td>
       <td>
         <button data-action="edit-player" data-id="${player.id}" data-name="${player.name}">Edit</button>
@@ -139,6 +141,81 @@ function getTopThreeRaidsForCharacter(character, raids) {
   }
 
   return top;
+}
+
+function renderScheduleSummary(data, scheduleResult) {
+  if (!data || !scheduleResult) {
+    scheduleSummary.classList.add("empty");
+    scheduleSummary.textContent = "Generate a schedule to see per-player summary.";
+    return;
+  }
+
+  const raidsById = new Map((data.raids ?? []).map((r) => [r.id, r]));
+  const assignedRaidIdsByCharacter = new Map();
+  const raidCountByPlayer = new Map();
+
+  for (const raidSchedule of scheduleResult.raidSchedules ?? []) {
+    for (const assignment of raidSchedule.assignments ?? []) {
+      const charSet = assignedRaidIdsByCharacter.get(assignment.characterId) ?? new Set();
+      charSet.add(assignment.raidId);
+      assignedRaidIdsByCharacter.set(assignment.characterId, charSet);
+
+      raidCountByPlayer.set(assignment.playerId, (raidCountByPlayer.get(assignment.playerId) ?? 0) + 1);
+    }
+  }
+
+  const table = document.createElement("table");
+  table.className = "summary-table";
+
+  const thead = document.createElement("thead");
+  thead.innerHTML = `
+    <tr>
+      <th>Player</th>
+      <th>Raids In</th>
+      <th>Left Out Details</th>
+    </tr>
+  `;
+  table.append(thead);
+
+  const tbody = document.createElement("tbody");
+
+  for (const player of data.players ?? []) {
+    const playerCharacters = (data.characters ?? []).filter((c) => c.playerId === player.id);
+    const missingByCharacter = [];
+
+    for (const character of playerCharacters) {
+      const topThree = getTopThreeRaidsForCharacter(character, data.raids ?? []);
+      const optedOut = new Set(character.raidOptOutRaidIds ?? []);
+      const requiredRaids = topThree.filter((r) => !optedOut.has(r.id));
+      const assignedRaidIds = assignedRaidIdsByCharacter.get(character.id) ?? new Set();
+
+      const missing = requiredRaids
+        .filter((r) => !assignedRaidIds.has(r.id))
+        .map((r) => `${normalizeDisplayText(r.name)}-${normalizeDisplayText(r.difficulty)}`);
+
+      if (missing.length > 0) {
+        missingByCharacter.push(`${normalizeDisplayText(character.name)}: ${missing.join(", ")}`);
+      }
+    }
+
+    const tr = document.createElement("tr");
+    const raidCount = raidCountByPlayer.get(player.id) ?? 0;
+
+    tr.innerHTML = `
+      <td>${escapeHtml(normalizeDisplayText(player.name))}</td>
+      <td>${raidCount}</td>
+      <td>${missingByCharacter.length > 0
+    ? escapeHtml(missingByCharacter.join(" | "))
+    : '<span class="summary-muted">None</span>'}</td>
+    `;
+
+    tbody.append(tr);
+  }
+
+  table.append(tbody);
+  scheduleSummary.classList.remove("empty");
+  scheduleSummary.innerHTML = "";
+  scheduleSummary.append(table);
 }
 
 function renderCharacters(characters, playersById, raids) {
@@ -492,6 +569,7 @@ async function refresh() {
 playerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const name = document.getElementById("player-name").value.trim();
+  const vip = document.getElementById("player-vip").checked;
   if (!name) {
     return;
   }
@@ -499,9 +577,10 @@ playerForm.addEventListener("submit", async (event) => {
   try {
     await api("/players", {
       method: "POST",
-      body: JSON.stringify({ name })
+      body: JSON.stringify({ name, vip })
     });
     document.getElementById("player-name").value = "";
+    document.getElementById("player-vip").checked = false;
     await refresh();
     setStatus("Player added.");
   } catch (error) {
@@ -613,6 +692,28 @@ playersTable.addEventListener("click", async (event) => {
       setStatus("Player updated.");
     }
   } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+playersTable.addEventListener("change", async (event) => {
+  const input = event.target.closest('input[data-action="toggle-player-vip"]');
+  if (!input) {
+    return;
+  }
+
+  const id = input.dataset.id;
+  const vip = input.checked;
+
+  try {
+    await api(`/players/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ vip })
+    });
+    await refresh();
+    setStatus("Player VIP flag updated.");
+  } catch (error) {
+    input.checked = !vip;
     setStatus(error.message, true);
   }
 });
@@ -829,13 +930,21 @@ generateScheduleButton.addEventListener("click", async () => {
   generateScheduleButton.textContent = "Generating...";
 
   try {
-    const grid = await api("/schedules/grid", {
-      method: "POST",
-      body: JSON.stringify({})
-    });
+    const [grid, scheduleResult, data] = await Promise.all([
+      api("/schedules/grid", {
+        method: "POST",
+        body: JSON.stringify({})
+      }),
+      api("/schedules/generate", {
+        method: "POST",
+        body: JSON.stringify({})
+      }),
+      api("/data")
+    ]);
 
     currentGridModel = JSON.parse(JSON.stringify(grid));
     renderScheduleGrid(currentGridModel);
+    renderScheduleSummary(data, scheduleResult);
     setStatus("Schedule grid generated.");
   } catch (error) {
     setStatus(error.message, true);

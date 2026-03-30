@@ -146,6 +146,22 @@ table {
   border-bottom-color: #efb0b0;
 }
 
+.summary-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.summary-table td,
+.summary-table th {
+  border-bottom: 1px solid #e4e8ed;
+  padding: 8px;
+  vertical-align: top;
+}
+
+.summary-muted {
+  color: #4b5563;
+}
+
 th,
 td {
   border-bottom: 1px solid #e4e8ed;

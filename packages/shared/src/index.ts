@@ -8,7 +8,8 @@ export const DayOfWeekSchema = z.number().int().min(0).max(6);
 export const MinuteOfDaySchema = z.number().int().min(0).max(24 * 60 - 1);
 
 const PlayerCreateSchemaBase = z.object({
-  name: z.string().min(1)
+  name: z.string().min(1),
+  vip: z.boolean().default(false)
 });
 
 const CharacterCreateSchemaBase = z.object({

@@ -49,8 +49,9 @@ app.post("/players", async (req, res) => {
 });
 
 const PlayerUpdateSchema = z.object({
-  name: z.string().min(1).optional()
-}).refine((v) => v.name !== undefined, {
+  name: z.string().min(1).optional(),
+  vip: z.boolean().optional()
+}).refine((v) => v.name !== undefined || v.vip !== undefined, {
   message: "At least one field must be provided"
 });
 
