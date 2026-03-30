@@ -15,11 +15,14 @@ type GridOptions = {
 type GridRow = {
   notes: string;
   time: string;
-  day: string;
   raid: string;
   corePlayers: Record<string, string>;
   supports: string[];
   count: number;
+  startMinute: number;
+  durationMinutes: number;
+  dayOfWeek: number;
+  rowKey: string;
 };
 
 type DayBlock = {
@@ -61,10 +64,10 @@ export function toWeeklyGrid(
 
   const baseOrder = options?.corePlayerOrder && options.corePlayerOrder.length > 0
     ? options.corePlayerOrder
-    : [...discoveredPlayers].sort((a, b) => a.localeCompare(b));
+    : input.players.map((p) => p.name);
 
   const corePlayerOrder = [...baseOrder];
-  for (const discovered of [...discoveredPlayers].sort((a, b) => a.localeCompare(b))) {
+  for (const discovered of [...discoveredPlayers]) {
     if (!corePlayerOrder.includes(discovered)) {
       corePlayerOrder.push(discovered);
     }
@@ -109,11 +112,14 @@ export function toWeeklyGrid(
       row: {
         notes: "",
         time: formatMinuteOfDay(raidSchedule.raid.startMinute),
-        day: DAY_NAMES[raidSchedule.raid.dayOfWeek],
         raid: `${raidSchedule.raid.name}-${raidSchedule.raid.difficulty}`,
         corePlayers,
         supports,
-        count: raidSchedule.assignments.length
+        count: raidSchedule.assignments.length,
+        startMinute: raidSchedule.raid.startMinute,
+        durationMinutes: raidSchedule.raid.durationMinutes,
+        dayOfWeek: raidSchedule.raid.dayOfWeek,
+        rowKey: `${raidSchedule.raid.id}-${raidSchedule.raid.dayOfWeek}-${raidSchedule.raid.startMinute}`
       }
     });
   }

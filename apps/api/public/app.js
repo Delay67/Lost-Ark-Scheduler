@@ -16,6 +16,9 @@ const availabilityForm = document.getElementById("availability-form");
 const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 let latestCharacters = [];
 let latestRaids = [];
+let latestPlayers = [];
+let currentGridModel = null;
+let activeDrag = null;
 
 const tabButtons = [...document.querySelectorAll("[data-tab-target]")];
 const tabPanels = [...document.querySelectorAll("[data-tab]")];
@@ -35,6 +38,23 @@ for (const button of tabButtons) {
 function setStatus(message, isError = false) {
   statusEl.textContent = message;
   statusEl.style.color = isError ? "#b11" : "#064";
+}
+
+function normalizeDisplayText(value) {
+  const text = String(value ?? "");
+  if (!/[ÃÂâ]/.test(text)) {
+    return text;
+  }
+
+  try {
+    return decodeURIComponent(escape(text));
+  } catch {
+    return text;
+  }
+}
+
+function normalizeLookupKey(value) {
+  return normalizeDisplayText(value).trim().toLowerCase();
 }
 
 async function api(path, options = {}) {
@@ -61,12 +81,12 @@ function buildPlayerSelect(players) {
   for (const player of players) {
     const option = document.createElement("option");
     option.value = player.id;
-    option.textContent = player.name;
+    option.textContent = normalizeDisplayText(player.name);
     characterPlayerSelect.append(option);
 
     const optionAvailability = document.createElement("option");
     optionAvailability.value = player.id;
-    optionAvailability.textContent = player.name;
+    optionAvailability.textContent = normalizeDisplayText(player.name);
     availabilityPlayerSelect.append(optionAvailability);
   }
 }
@@ -76,7 +96,7 @@ function renderPlayers(players) {
   for (const player of players) {
     const row = document.createElement("tr");
     row.innerHTML = `
-      <td>${player.name}</td>
+      <td>${normalizeDisplayText(player.name)}</td>
       <td>${player.id}</td>
       <td>
         <button data-action="edit-player" data-id="${player.id}" data-name="${player.name}">Edit</button>
@@ -130,15 +150,15 @@ function renderCharacters(characters, playersById, raids) {
       ? `<div class="raid-opt-list">${topRaids
         .map((raid) => {
           const checked = !optOut.has(raid.id);
-          return `<label class="raid-opt-item"><input type="checkbox" data-action="toggle-raid-optout" data-character-id="${character.id}" data-raid-id="${raid.id}" ${checked ? "checked" : ""}/> ${escapeHtml(`${raid.name}-${raid.difficulty}`)}</label>`;
+          return `<label class="raid-opt-item"><input type="checkbox" data-action="toggle-raid-optout" data-character-id="${character.id}" data-raid-id="${raid.id}" ${checked ? "checked" : ""}/> ${escapeHtml(normalizeDisplayText(`${raid.name}-${raid.difficulty}`))}</label>`;
         })
         .join("")}</div>`
       : `<span class="raid-opt-empty">No eligible raids</span>`;
 
     const row = document.createElement("tr");
     row.innerHTML = `
-      <td>${character.name}</td>
-      <td>${playersById.get(character.playerId) ?? character.playerId}</td>
+      <td>${normalizeDisplayText(character.name)}</td>
+      <td>${normalizeDisplayText(playersById.get(character.playerId) ?? character.playerId)}</td>
       <td>${character.role}</td>
       <td>${character.itemLevel}</td>
       <td>${topRaidsHtml}</td>
@@ -190,7 +210,7 @@ function renderAvailability(windows, playersById) {
   for (const window of windows) {
     const row = document.createElement("tr");
     row.innerHTML = `
-      <td>${playersById.get(window.playerId) ?? window.playerId}</td>
+      <td>${normalizeDisplayText(playersById.get(window.playerId) ?? window.playerId)}</td>
       <td>${dayNames[window.dayOfWeek] ?? window.dayOfWeek}</td>
       <td>${window.startMinute}</td>
       <td>${window.endMinute}</td>
@@ -220,6 +240,111 @@ function escapeHtml(text) {
     .replaceAll("'", "&#39;");
 }
 
+function formatMinuteOfDay(minuteOfDay) {
+  const hours = Math.floor(minuteOfDay / 60);
+  const minutes = minuteOfDay % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function reflowDayTimes(dayRows) {
+  if (!dayRows.length) {
+    return;
+  }
+
+  const validStarts = dayRows
+    .map((r) => Number(r.startMinute))
+    .filter((n) => Number.isFinite(n));
+  let running = validStarts.length > 0 ? Math.min(...validStarts) : 1020;
+
+  for (const row of dayRows) {
+    row.startMinute = running;
+    row.time = formatMinuteOfDay(running);
+    const duration = Number(row.durationMinutes);
+    running += Number.isFinite(duration) && duration > 0 ? duration : 20;
+  }
+}
+
+function ensureSupportCapacity(row, supportCount) {
+  if (!Array.isArray(row.supports)) {
+    row.supports = [];
+  }
+  while (row.supports.length < supportCount) {
+    row.supports.push("");
+  }
+}
+
+function getSlotValue(row, slot) {
+  if (slot.type === "core") {
+    return row.corePlayers?.[slot.playerKey] ?? "";
+  }
+  return row.supports?.[slot.supportIndex] ?? "";
+}
+
+function setSlotValue(row, slot, value, supportCount) {
+  if (slot.type === "core") {
+    row.corePlayers[slot.playerKey] = value;
+    return;
+  }
+
+  ensureSupportCapacity(row, supportCount);
+  row.supports[slot.supportIndex] = value;
+}
+
+function supportValueToPlayerName(value) {
+  const key = normalizeLookupKey(value);
+  if (!key) {
+    return "";
+  }
+
+  const byName = latestPlayers.find((p) => normalizeLookupKey(p.name) === key);
+  if (byName) {
+    return byName.name;
+  }
+
+  const byCharacter = latestCharacters.find((c) => normalizeLookupKey(c.name) === key);
+  if (!byCharacter) {
+    return "";
+  }
+
+  const owner = latestPlayers.find((p) => p.id === byCharacter.playerId);
+  return owner?.name ?? "";
+}
+
+function rowAssignmentCount(row, coreCols, supportCount) {
+  const selectedPlayers = new Set();
+  for (const key of coreCols) {
+    if ((row.corePlayers?.[key] ?? "") !== "") {
+      selectedPlayers.add(key);
+    }
+  }
+
+  ensureSupportCapacity(row, supportCount);
+  for (let i = 0; i < supportCount; i += 1) {
+    const supportValue = row.supports?.[i] ?? "";
+    if (!supportValue) {
+      continue;
+    }
+
+    const ownerName = supportValueToPlayerName(supportValue);
+    if (ownerName) {
+      selectedPlayers.add(ownerName);
+    }
+  }
+
+  return selectedPlayers.size;
+}
+
+function tryPlaceSupportReplacement(row, replacementValue, supportCount) {
+  ensureSupportCapacity(row, supportCount);
+  for (let i = 0; i < supportCount; i += 1) {
+    if ((row.supports[i] ?? "") === "") {
+      row.supports[i] = replacementValue;
+      return true;
+    }
+  }
+  return false;
+}
+
 function renderScheduleGrid(grid) {
   if (!grid?.days?.length) {
     scheduleGrid.classList.add("empty");
@@ -238,9 +363,8 @@ function renderScheduleGrid(grid) {
   const headers = [
     "Notes",
     "Time",
-    "Day",
     "Raid",
-    ...coreCols,
+    ...coreCols.map((name) => normalizeDisplayText(name)),
     ...Array.from({ length: supportCount }, (_, index) => `Support ${index + 1}`),
     "Count"
   ];
@@ -256,7 +380,8 @@ function renderScheduleGrid(grid) {
 
   const tbody = document.createElement("tbody");
 
-  for (const dayBlock of grid.days) {
+  for (let dayIndex = 0; dayIndex < grid.days.length; dayIndex += 1) {
+    const dayBlock = grid.days[dayIndex];
     const dayRows = dayBlock.rows ?? [];
     if (dayRows.length > 0) {
       const dividerRow = document.createElement("tr");
@@ -271,25 +396,69 @@ function renderScheduleGrid(grid) {
       tbody.append(dividerRow);
     }
 
-    for (const row of dayRows) {
+    for (let rowIndex = 0; rowIndex < dayRows.length; rowIndex += 1) {
+      const row = dayRows[rowIndex];
       const tr = document.createElement("tr");
+      tr.draggable = true;
+      tr.dataset.dayIndex = String(dayIndex);
+      tr.dataset.rowIndex = String(rowIndex);
+
+      const currentCount = rowAssignmentCount(row, coreCols, supportCount);
+      row.count = currentCount;
+      tr.classList.toggle("impossible-row", currentCount > 8);
 
       const supportCells = Array.from({ length: supportCount }, (_, i) => row.supports?.[i] ?? "");
-      const cellValues = [
-        row.notes ?? "",
+      const noteCell = document.createElement("td");
+      noteCell.className = "note-cell";
+      noteCell.dataset.noteKey = row.rowKey ?? `${dayBlock.day}-${row.time}-${row.raid}`;
+      noteCell.textContent = normalizeDisplayText(row.notes ?? "");
+      noteCell.title = "Click to edit note";
+      tr.append(noteCell);
+
+      const textCells = [
         row.time ?? "",
-        row.day ?? dayBlock.day ?? "",
-        row.raid ?? "",
-        ...coreCols.map((playerName) => row.corePlayers?.[playerName] ?? ""),
-        ...supportCells,
-        String(row.count ?? 0)
+        row.raid ?? ""
       ];
 
-      for (const value of cellValues) {
+      for (const value of textCells) {
         const td = document.createElement("td");
-        td.innerHTML = escapeHtml(value);
+        td.innerHTML = escapeHtml(normalizeDisplayText(value));
         tr.append(td);
       }
+
+      for (const playerName of coreCols) {
+        const td = document.createElement("td");
+        td.className = "slot-cell";
+        td.dataset.slotType = "core";
+        td.dataset.playerKey = playerName;
+        td.dataset.dayIndex = String(dayIndex);
+        td.dataset.rowIndex = String(rowIndex);
+
+        const value = normalizeDisplayText(row.corePlayers?.[playerName] ?? "");
+        if (value) {
+          td.innerHTML = `<span class="drag-token" draggable="true">${escapeHtml(value)}</span>`;
+        }
+        tr.append(td);
+      }
+
+      for (let i = 0; i < supportCount; i += 1) {
+        const td = document.createElement("td");
+        td.className = "slot-cell support-slot";
+        td.dataset.slotType = "support";
+        td.dataset.supportIndex = String(i);
+        td.dataset.dayIndex = String(dayIndex);
+        td.dataset.rowIndex = String(rowIndex);
+
+        const value = normalizeDisplayText(supportCells[i] ?? "");
+        if (value) {
+          td.innerHTML = `<span class="drag-token" draggable="true">${escapeHtml(value)}</span>`;
+        }
+        tr.append(td);
+      }
+
+      const countTd = document.createElement("td");
+      countTd.textContent = String(currentCount);
+      tr.append(countTd);
 
       tbody.append(tr);
     }
@@ -309,6 +478,7 @@ async function refresh() {
     api("/raids"),
     api("/availability-windows")
   ]);
+  latestPlayers = players;
   latestCharacters = characters;
   latestRaids = raids;
   const playersById = new Map(players.map((p) => [p.id, p.name]));
@@ -664,13 +834,256 @@ generateScheduleButton.addEventListener("click", async () => {
       body: JSON.stringify({})
     });
 
-    renderScheduleGrid(grid);
+    currentGridModel = JSON.parse(JSON.stringify(grid));
+    renderScheduleGrid(currentGridModel);
     setStatus("Schedule grid generated.");
   } catch (error) {
     setStatus(error.message, true);
   } finally {
     generateScheduleButton.disabled = false;
     generateScheduleButton.textContent = "Generate Schedule Grid";
+  }
+});
+
+scheduleGrid.addEventListener("click", (event) => {
+  const noteCell = event.target.closest("td.note-cell");
+  if (!noteCell || !currentGridModel) {
+    return;
+  }
+
+  const dayRow = noteCell.closest("tr[data-day-index][data-row-index]");
+  if (!dayRow) {
+    return;
+  }
+
+  const dayIndex = Number(dayRow.dataset.dayIndex);
+  const rowIndex = Number(dayRow.dataset.rowIndex);
+  const row = currentGridModel.days?.[dayIndex]?.rows?.[rowIndex];
+  if (!row) {
+    return;
+  }
+
+  const next = window.prompt("Row note", row.notes ?? "");
+  if (next === null) {
+    return;
+  }
+
+  row.notes = next;
+  renderScheduleGrid(currentGridModel);
+  setStatus("Note updated for this generated view.");
+});
+
+function parseSlotFromCell(cell) {
+  if (!cell) {
+    return null;
+  }
+
+  const slotType = cell.dataset.slotType;
+  if (slotType === "core") {
+    return {
+      type: "core",
+      playerKey: cell.dataset.playerKey
+    };
+  }
+
+  if (slotType === "support") {
+    return {
+      type: "support",
+      supportIndex: Number(cell.dataset.supportIndex)
+    };
+  }
+
+  return null;
+}
+
+function moveTokenBetweenSlots(sourceRef, targetRef) {
+  if (!currentGridModel) {
+    return;
+  }
+
+  const supportCount = Number(currentGridModel.columns?.supports ?? 2);
+  const sourceRow = currentGridModel.days?.[sourceRef.dayIndex]?.rows?.[sourceRef.rowIndex];
+  const targetRow = currentGridModel.days?.[targetRef.dayIndex]?.rows?.[targetRef.rowIndex];
+  if (!sourceRow || !targetRow) {
+    return;
+  }
+
+  if (sourceRow.raid !== targetRow.raid) {
+    setStatus("Players can only be moved between rows of the same raid.", true);
+    return;
+  }
+
+  const sourceValue = getSlotValue(sourceRow, sourceRef.slot);
+  if (!sourceValue) {
+    return;
+  }
+
+  const targetValue = getSlotValue(targetRow, targetRef.slot);
+  setSlotValue(targetRow, targetRef.slot, sourceValue, supportCount);
+  setSlotValue(sourceRow, sourceRef.slot, "", supportCount);
+
+  if (targetValue) {
+    if (
+      targetRef.slot.type === "support"
+      && sourceRef.slot.type !== "support"
+      && !tryPlaceSupportReplacement(sourceRow, targetValue, supportCount)
+    ) {
+      setSlotValue(sourceRow, sourceRef.slot, targetValue, supportCount);
+    } else {
+      setSlotValue(sourceRow, sourceRef.slot, targetValue, supportCount);
+    }
+  }
+}
+
+scheduleGrid.addEventListener("dragstart", (event) => {
+  const token = event.target.closest(".drag-token");
+  if (token) {
+    const sourceCell = token.closest("td.slot-cell");
+    const slot = parseSlotFromCell(sourceCell);
+    if (!slot || !sourceCell || !currentGridModel) {
+      return;
+    }
+
+    activeDrag = {
+      type: "token",
+      source: {
+        dayIndex: Number(sourceCell.dataset.dayIndex),
+        rowIndex: Number(sourceCell.dataset.rowIndex),
+        slot
+      }
+    };
+    token.classList.add("is-dragging-token");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+    }
+    event.stopPropagation();
+    return;
+  }
+
+  const row = event.target.closest("tr[data-day-index][data-row-index]");
+  if (row && currentGridModel) {
+    activeDrag = {
+      type: "row",
+      dayIndex: Number(row.dataset.dayIndex),
+      rowIndex: Number(row.dataset.rowIndex)
+    };
+    row.classList.add("is-dragging");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+    }
+  }
+});
+
+scheduleGrid.addEventListener("dragover", (event) => {
+  if (!activeDrag) {
+    return;
+  }
+
+  if (activeDrag.type === "token") {
+    const slotCell = event.target.closest("td.slot-cell");
+    if (!slotCell) {
+      return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "move";
+    }
+    return;
+  }
+
+  if (activeDrag.type === "row") {
+    const row = event.target.closest("tr[data-day-index][data-row-index]");
+    if (!row) {
+      return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "move";
+    }
+  }
+});
+
+scheduleGrid.addEventListener("drop", (event) => {
+  if (!activeDrag || !currentGridModel) {
+    return;
+  }
+
+  if (activeDrag.type === "token") {
+    const targetCell = event.target.closest("td.slot-cell");
+    const targetSlot = parseSlotFromCell(targetCell);
+    if (!targetCell || !targetSlot) {
+      return;
+    }
+
+    event.preventDefault();
+    const targetRef = {
+      dayIndex: Number(targetCell.dataset.dayIndex),
+      rowIndex: Number(targetCell.dataset.rowIndex),
+      slot: targetSlot
+    };
+
+    if (
+      activeDrag.source.dayIndex === targetRef.dayIndex
+      && activeDrag.source.rowIndex === targetRef.rowIndex
+      && activeDrag.source.slot.type === targetRef.slot.type
+      && (activeDrag.source.slot.type === "core"
+        ? activeDrag.source.slot.playerKey === targetRef.slot.playerKey
+        : activeDrag.source.slot.supportIndex === targetRef.slot.supportIndex)
+    ) {
+      return;
+    }
+
+    moveTokenBetweenSlots(activeDrag.source, targetRef);
+    renderScheduleGrid(currentGridModel);
+    setStatus("Player arrangement updated. Red rows are impossible (>8).", false);
+    return;
+  }
+
+  const targetRow = event.target.closest("tr[data-day-index][data-row-index]");
+  if (!targetRow) {
+    return;
+  }
+
+  event.preventDefault();
+  const targetDayIndex = Number(targetRow.dataset.dayIndex);
+  const targetRowIndex = Number(targetRow.dataset.rowIndex);
+
+  const sourceRows = currentGridModel.days?.[activeDrag.dayIndex]?.rows;
+  const targetRows = currentGridModel.days?.[targetDayIndex]?.rows;
+  if (!sourceRows || !targetRows || activeDrag.rowIndex < 0 || activeDrag.rowIndex >= sourceRows.length) {
+    return;
+  }
+
+  const [moved] = sourceRows.splice(activeDrag.rowIndex, 1);
+  if (!moved) {
+    return;
+  }
+
+  let insertIndex = targetRowIndex;
+  if (activeDrag.dayIndex === targetDayIndex && activeDrag.rowIndex < targetRowIndex) {
+    insertIndex -= 1;
+  }
+  insertIndex = Math.max(0, Math.min(insertIndex, targetRows.length));
+  targetRows.splice(insertIndex, 0, moved);
+
+  reflowDayTimes(targetRows);
+  if (sourceRows !== targetRows) {
+    reflowDayTimes(sourceRows);
+  }
+  renderScheduleGrid(currentGridModel);
+  setStatus("Row reordered and times updated.");
+});
+
+scheduleGrid.addEventListener("dragend", () => {
+  activeDrag = null;
+  const dragging = scheduleGrid.querySelector("tr.is-dragging");
+  if (dragging) {
+    dragging.classList.remove("is-dragging");
+  }
+
+  const draggingToken = scheduleGrid.querySelector(".is-dragging-token");
+  if (draggingToken) {
+    draggingToken.classList.remove("is-dragging-token");
   }
 });
 

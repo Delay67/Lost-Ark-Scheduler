@@ -10,9 +10,10 @@ body {
 }
 
 .container {
-  max-width: 1200px;
+  max-width: none;
+  width: 100%;
   margin: 0 auto;
-  padding: 24px;
+  padding: 16px 20px;
 }
 
 .tabs {
@@ -112,12 +113,46 @@ table {
   padding-bottom: 10px;
 }
 
+.schedule-table tr[draggable="true"] {
+  cursor: grab;
+}
+
+.schedule-table tr.is-dragging {
+  opacity: 0.55;
+}
+
+.note-cell {
+  cursor: text;
+  min-width: 72px;
+  color: #374151;
+}
+
+.drag-token {
+  display: inline-block;
+  cursor: move;
+  padding: 1px 2px;
+  border-radius: 4px;
+}
+
+.drag-token.is-dragging-token {
+  opacity: 0.6;
+}
+
+.schedule-table tr.impossible-row {
+  background: #ffe8e8;
+}
+
+.schedule-table tr.impossible-row td {
+  border-bottom-color: #efb0b0;
+}
+
 th,
 td {
   border-bottom: 1px solid #e4e8ed;
   text-align: left;
-  padding: 8px;
+  padding: 6px;
   vertical-align: top;
+  white-space: nowrap;
 }
 
 .raid-opt-list {

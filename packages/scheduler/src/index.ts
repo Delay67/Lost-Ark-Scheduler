@@ -435,6 +435,7 @@ function evaluateSlot(
     const seededAssignments: Assignment[] = [];
     const seededUsedCharacterIds = new Set<string>();
     const seededUsedPlayerIds = new Set<string>();
+    const candidateById = new Map(sortedCandidates.map((c) => [c.id, c]));
     let seededSupportCount = 0;
     let seededDpsCount = 0;
 
@@ -468,6 +469,34 @@ function evaluateSlot(
         break;
       }
       seededDpsCount += 1;
+    }
+
+    // If support slots remain open, prefer converting flex DPS to support.
+    while (seededSupportCount < caps.maxSupport) {
+      const flexDpsAssignment = seededAssignments.find((assignment) => {
+        if (assignment.assignedRole !== "DPS") {
+          return false;
+        }
+        const character = candidateById.get(assignment.characterId);
+        return character?.role === "DPS/Support";
+      });
+
+      if (!flexDpsAssignment) {
+        break;
+      }
+
+      flexDpsAssignment.assignedRole = "Support";
+      seededSupportCount += 1;
+      seededDpsCount = Math.max(0, seededDpsCount - 1);
+
+      // After promoting flex to support, try to refill DPS from unused candidates.
+      while (seededDpsCount < caps.maxDps && seededAssignments.length < capacity) {
+        const assigned = tryAssign("DPS", seededUsedCharacterIds, seededUsedPlayerIds, seededAssignments);
+        if (!assigned) {
+          break;
+        }
+        seededDpsCount += 1;
+      }
     }
 
     return seededAssignments;
